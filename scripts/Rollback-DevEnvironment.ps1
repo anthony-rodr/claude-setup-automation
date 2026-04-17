@@ -822,10 +822,10 @@ if (Test-Path $msiProductsPath) {
 $msiUserDataRoot = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Installer\UserData'
 if (Test-Path $msiUserDataRoot) {
     Get-ChildItem $msiUserDataRoot -ErrorAction SilentlyContinue | ForEach-Object {
-        $productsKey = "Registry::$($_.PSPath)\Products"
+        $productsKey = Join-Path $_.PSPath 'Products'
         if (Test-Path $productsKey) {
             Get-ChildItem $productsKey -ErrorAction SilentlyContinue | ForEach-Object {
-                $ipKey = "Registry::$($_.PSPath)\InstallProperties"
+                $ipKey = Join-Path $_.PSPath 'InstallProperties'
                 $ip  = Get-ItemProperty $ipKey -ErrorAction SilentlyContinue
                 $ipn = if ($ip -and $ip.PSObject.Properties['DisplayName']) { $ip.PSObject.Properties['DisplayName'].Value } else { $null }
                 if ($ipn) {
