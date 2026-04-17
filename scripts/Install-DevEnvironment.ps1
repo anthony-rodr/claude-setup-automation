@@ -238,8 +238,16 @@ $Packages = @(
             # Fallback to known stable
             'https://www.python.org/ftp/python/3.12.9/python-3.12.9-amd64.exe'
         }
-        DArgs  = '/quiet InstallAllUsers=1 PrependPath=1 Include_test=0'
-        DType  = 'exe'
+        DArgs     = '/quiet InstallAllUsers=1 PrependPath=1 Include_test=0'
+        DType     = 'exe'
+        # Known machine-wide install paths — used as fallback when 1638 persists after uninstall attempt
+        AltPaths  = @(
+            'C:\Program Files\Python312',
+            'C:\Program Files\Python313',
+            'C:\Program Files\Python311',
+            'C:\Python312',
+            'C:\Python3'
+        )
     }
     @{
         Name   = 'GitHub CLI'
@@ -635,6 +643,25 @@ function Install-ViaDirectDownload {
                         Write-Log "  Installer /uninstall exited $($pUn.ExitCode)" 'DIAG'
                     }
                     $p = Start-Process $tmpFile -ArgumentList $Pkg.DArgs -Wait -PassThru -NoNewWindow
+                    # If still 1638, the uninstall didn't fully clear it.
+                    # Find the existing install directory and add it to PATH — Python is
+                    # already functional, it just isn't on PATH.
+                    if ($p.ExitCode -eq 1638 -and $Pkg.PSObject.Properties['AltPaths']) {
+                        Write-Log "  Still 1638 after uninstall — scanning for existing install…" 'WARN'
+                        $altDir = $Pkg.AltPaths | Where-Object { Test-Path $_ } | Select-Object -First 1
+                        if ($altDir) {
+                            $mp = [System.Environment]::GetEnvironmentVariable('Path', 'Machine')
+                            if ($mp -notlike "*$altDir*") {
+                                [System.Environment]::SetEnvironmentVariable('Path', "$mp;$altDir", 'Machine')
+                                $env:Path = "$env:Path;$altDir"
+                                Write-Log "  Added existing install to machine PATH: $altDir" 'OK'
+                            } else {
+                                Write-Log "  Existing install already in PATH: $altDir" 'DIAG'
+                            }
+                            Write-Log "  Direct install OK (pre-existing): $($Pkg.Name)" 'OK'
+                            return $true
+                        }
+                    }
                 }
                 if ($p.ExitCode -notin @(0, 3010)) { throw "Exit code $($p.ExitCode)" }
             }
