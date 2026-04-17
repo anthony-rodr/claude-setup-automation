@@ -1,0 +1,17 @@
+# Release zips — created by Package-Release.ps1, uploaded to GitHub Releases
+*.zip
+
+# Bundled installers — downloaded locally by Package-Release.ps1, not committed
+bundled/
+
+# Logs
+*.log
+
+# Node modules (chatbot dependencies)
+node_modules/
+package-lock.json
+
+# Editor / OS
+.vscode/settings.json
+Thumbs.db
+Desktop.ini

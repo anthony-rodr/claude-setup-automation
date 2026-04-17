@@ -1,0 +1,16 @@
+{
+  "name": "me-dev-setup-guide",
+  "version": "1.0.0",
+  "description": "Master Electronics developer environment setup guide chatbot",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.55.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
