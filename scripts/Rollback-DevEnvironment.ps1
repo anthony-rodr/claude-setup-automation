@@ -798,6 +798,50 @@ Get-ChildItem 'C:\Users' -Directory -ErrorAction SilentlyContinue |
         }
     }
 
+# Clean MSI product database — Python's EXE installer checks
+# HKLM\SOFTWARE\Classes\Installer\Products\ (MSI internal DB), which is separate
+# from the Uninstall keys above.  If this survives rollback, reinstalls return 1638.
+$msiProductPatterns = @('*Python*', '*Node.js*', '*Git*', '*GitHub CLI*', '*Visual Studio Code*', '*PowerShell*', '*AWS Command Line*', '*Terraform*')
+$msiProductsPath = 'HKLM:\SOFTWARE\Classes\Installer\Products'
+if (Test-Path $msiProductsPath) {
+    Get-ChildItem $msiProductsPath -ErrorAction SilentlyContinue | ForEach-Object {
+        $mp  = Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue
+        $mpn = if ($mp -and $mp.PSObject.Properties['ProductName']) { $mp.PSObject.Properties['ProductName'].Value } else { $null }
+        if ($mpn) {
+            foreach ($pat in $msiProductPatterns) {
+                if ($mpn -like $pat) {
+                    Remove-Item $_.PSPath -Recurse -Force -ErrorAction SilentlyContinue
+                    Write-Log "  Removed MSI product registration: $mpn" 'DIAG'
+                    break
+                }
+            }
+        }
+    }
+}
+# Also clean MSI UserData (machine-wide installs register under S-1-5-18)
+$msiUserDataRoot = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Installer\UserData'
+if (Test-Path $msiUserDataRoot) {
+    Get-ChildItem $msiUserDataRoot -ErrorAction SilentlyContinue | ForEach-Object {
+        $productsKey = "Registry::$($_.PSPath)\Products"
+        if (Test-Path $productsKey) {
+            Get-ChildItem $productsKey -ErrorAction SilentlyContinue | ForEach-Object {
+                $ipKey = "Registry::$($_.PSPath)\InstallProperties"
+                $ip  = Get-ItemProperty $ipKey -ErrorAction SilentlyContinue
+                $ipn = if ($ip -and $ip.PSObject.Properties['DisplayName']) { $ip.PSObject.Properties['DisplayName'].Value } else { $null }
+                if ($ipn) {
+                    foreach ($pat in $msiProductPatterns) {
+                        if ($ipn -like $pat) {
+                            Remove-Item $_.PSPath -Recurse -Force -ErrorAction SilentlyContinue
+                            Write-Log "  Removed MSI UserData entry: $ipn" 'DIAG'
+                            break
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 # Clean nvm / nodejs env vars
 foreach ($var in @('NVM_HOME','NVM_SYMLINK')) {
     if ([System.Environment]::GetEnvironmentVariable($var, 'Machine')) {

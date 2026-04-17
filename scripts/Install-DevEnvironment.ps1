@@ -653,11 +653,43 @@ function Install-ViaDirectDownload {
                         $pUn = Start-Process $tmpFile -ArgumentList '/quiet /uninstall' -Wait -PassThru -NoNewWindow
                         Write-Log "  Installer /uninstall exited $($pUn.ExitCode)" 'DIAG'
                     }
+                    # Clean MSI product database — Python's EXE installer checks
+                    # HKLM\SOFTWARE\Classes\Installer\Products\ (MSI internal DB), which
+                    # survives ordinary Uninstall key deletion and causes persistent 1638.
+                    $msiProductsPath = 'HKLM:\SOFTWARE\Classes\Installer\Products'
+                    if (Test-Path $msiProductsPath) {
+                        Get-ChildItem $msiProductsPath -ErrorAction SilentlyContinue | ForEach-Object {
+                            $mp  = Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue
+                            $mpn = if ($mp -and $mp.PSObject.Properties['ProductName']) { $mp.PSObject.Properties['ProductName'].Value } else { $null }
+                            if ($mpn -and $mpn -like "*$($Pkg.Name.Split(' ')[0])*") {
+                                Remove-Item $_.PSPath -Recurse -Force -ErrorAction SilentlyContinue
+                                Write-Log "  Removed MSI product registration: $mpn" 'DIAG'
+                            }
+                        }
+                    }
+                    # Also clean per-user MSI data (machine installs land under S-1-5-18)
+                    $msiUserDataRoot = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Installer\UserData'
+                    if (Test-Path $msiUserDataRoot) {
+                        Get-ChildItem $msiUserDataRoot -ErrorAction SilentlyContinue | ForEach-Object {
+                            $productsKey = Join-Path $_.PSPath 'Products'
+                            if (Test-Path "Registry::$productsKey") {
+                                Get-ChildItem "Registry::$productsKey" -ErrorAction SilentlyContinue | ForEach-Object {
+                                    $ipKey = Join-Path $_.PSPath 'InstallProperties'
+                                    $ip = Get-ItemProperty "Registry::$ipKey" -ErrorAction SilentlyContinue
+                                    $ipn = if ($ip -and $ip.PSObject.Properties['DisplayName']) { $ip.PSObject.Properties['DisplayName'].Value } else { $null }
+                                    if ($ipn -and $ipn -like "*$($Pkg.Name.Split(' ')[0])*") {
+                                        Remove-Item $_.PSPath -Recurse -Force -ErrorAction SilentlyContinue
+                                        Write-Log "  Removed MSI UserData entry: $ipn" 'DIAG'
+                                    }
+                                }
+                            }
+                        }
+                    }
                     $p = Start-Process $tmpFile -ArgumentList $Pkg.DArgs -Wait -PassThru -NoNewWindow
                     # If still 1638, the uninstall didn't fully clear it.
                     # Find the existing install directory and add it to PATH — Python is
                     # already functional, it just isn't on PATH.
-                    if ($p.ExitCode -eq 1638 -and $Pkg.PSObject.Properties['AltPaths']) {
+                    if ($p.ExitCode -eq 1638 -and $Pkg.ContainsKey('AltPaths')) {
                         Write-Log "  Still 1638 after uninstall — scanning for existing install…" 'WARN'
                         $altDir = $Pkg.AltPaths | Where-Object { Test-Path $_ } | Select-Object -First 1
                         if ($altDir) {
@@ -1228,7 +1260,7 @@ function Show-VerificationReport {
         $exe = Get-Command $c.Cmd -ErrorAction SilentlyContinue
         # For tools with fallback paths, also check known install locations when
         # Get-Command misses them (e.g. Python in a new SYSTEM session before PATH refresh)
-        if (-not $exe -and $c.FallbackExes) {
+        if (-not $exe -and $c.ContainsKey('FallbackExes') -and $c['FallbackExes']) {
             $fb = $c.FallbackExes | Where-Object { Test-Path $_ } | Select-Object -First 1
             if ($fb) { $exe = $fb }
         }
