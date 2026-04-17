@@ -671,10 +671,10 @@ function Install-ViaDirectDownload {
                     if (Test-Path $msiUserDataRoot) {
                         Get-ChildItem $msiUserDataRoot -ErrorAction SilentlyContinue | ForEach-Object {
                             $productsKey = Join-Path $_.PSPath 'Products'
-                            if (Test-Path "Registry::$productsKey") {
-                                Get-ChildItem "Registry::$productsKey" -ErrorAction SilentlyContinue | ForEach-Object {
+                            if (Test-Path $productsKey) {
+                                Get-ChildItem $productsKey -ErrorAction SilentlyContinue | ForEach-Object {
                                     $ipKey = Join-Path $_.PSPath 'InstallProperties'
-                                    $ip = Get-ItemProperty "Registry::$ipKey" -ErrorAction SilentlyContinue
+                                    $ip = Get-ItemProperty $ipKey -ErrorAction SilentlyContinue
                                     $ipn = if ($ip -and $ip.PSObject.Properties['DisplayName']) { $ip.PSObject.Properties['DisplayName'].Value } else { $null }
                                     if ($ipn -and $ipn -like "*$($Pkg.Name.Split(' ')[0])*") {
                                         Remove-Item $_.PSPath -Recurse -Force -ErrorAction SilentlyContinue
@@ -987,6 +987,21 @@ proxy: none
                 if (Get-Command node -ErrorAction SilentlyContinue) {
                     $nodeOk = $true
                     Write-Log "  Node.js installed via Chocolatey: $(& node --version 2>&1)" 'OK'
+                } else {
+                    # Chocolatey installs nodejs-lts to C:\tools\nodejs which may not be in
+                    # the refreshed PATH yet in a SYSTEM session. Probe known paths directly.
+                    $chocoNodeDir = @('C:\tools\nodejs', 'C:\ProgramData\chocolatey\bin') |
+                        Where-Object { Test-Path (Join-Path $_ 'node.exe') } | Select-Object -First 1
+                    if ($chocoNodeDir) {
+                        if ($env:Path -notlike "*$chocoNodeDir*") { $env:Path = "$env:Path;$chocoNodeDir" }
+                        $mp = [System.Environment]::GetEnvironmentVariable('Path', 'Machine')
+                        if ($mp -notlike "*$chocoNodeDir*") {
+                            [System.Environment]::SetEnvironmentVariable('Path', "$mp;$chocoNodeDir", 'Machine')
+                        }
+                        $nodeOk = $true
+                        $nodeVer = try { & (Join-Path $chocoNodeDir 'node.exe') --version 2>&1 } catch { 'unknown' }
+                        Write-Log "  Node.js found via Chocolatey path probe: $nodeVer" 'OK'
+                    }
                 }
             } else {
                 Write-Log "  Chocolatey nodejs-lts failed (exit $LASTEXITCODE): $raw" 'WARN'
@@ -1264,7 +1279,18 @@ function Show-VerificationReport {
             if ($fb) { $exe = $fb }
         }
         if ($exe) {
-            $exeCmd = if ($exe -is [string]) { $exe } else { $exe.Source }
+            # .Source may not exist on all CommandInfo subtypes (functions, aliases);
+            # guard here so a bad node.exe state can't crash the whole verification.
+            $exeCmd = try {
+                if ($exe -is [string]) { $exe } else { $exe.Source }
+            } catch { $null }
+            if (-not $exeCmd) {
+                $row = "  {0,-15} OK   (path unresolvable)" -f $c.Label
+                Write-Log $row 'WARN'
+                $lines += $row
+                $pass++
+                continue
+            }
             # Run version check in a background job with an 8-second timeout.
             # Some CLI wrappers (e.g. VS Code's code.cmd) hang indefinitely under
             # SYSTEM context waiting for a UI/server connection.
@@ -1394,7 +1420,7 @@ Configure-ExistingProfiles
 Register-LogonTask
 
 # ── Verification report ───────────────────────────────────────────────────────
-Show-VerificationReport
+try { Show-VerificationReport } catch { Write-Log "Verification report error: $_" 'WARN' }
 
 # ── Final summary ─────────────────────────────────────────────────────────────
 $Manifest.EndTime = (Get-Date -Format 'o')
