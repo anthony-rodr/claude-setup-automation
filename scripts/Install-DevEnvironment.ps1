@@ -238,8 +238,9 @@ $Packages = @(
             # Fallback to known stable
             'https://www.python.org/ftp/python/3.12.9/python-3.12.9-amd64.exe'
         }
-        DArgs     = '/quiet InstallAllUsers=1 PrependPath=1 Include_test=0'
-        DType     = 'exe'
+        DArgs      = '/quiet InstallAllUsers=1 PrependPath=1 Include_test=0'
+        DType      = 'exe'
+        VerifyCmd  = 'python'   # Skip install if python is already functional
         # Known machine-wide install paths — used as fallback when 1638 persists after uninstall attempt
         AltPaths  = @(
             'C:\Program Files\Python312',
@@ -727,6 +728,18 @@ function Install-Package {
         Success   = $false
     }
 
+    # Pre-check: if VerifyCmd is defined and the tool is already functional, skip install entirely.
+    # Handles cases where the tool was installed manually or by a prior run that left it working.
+    if ($Pkg.VerifyCmd -and (Get-Command $Pkg.VerifyCmd -ErrorAction SilentlyContinue)) {
+        $existVer = try { (& $Pkg.VerifyCmd '--version' 2>&1 | Select-Object -First 1) -replace '\s+$','' } catch { 'present' }
+        Write-Log "  $($Pkg.Name) already installed ($existVer) — skipping." 'OK'
+        $entry.Method  = 'pre-existing'
+        $entry.Success = $true
+        $Manifest.Packages.Add($entry)
+        Save-Manifest
+        return
+    }
+
     if ($RunningAsSystem) {
         # SYSTEM context (NinjaOne): Chocolatey → Direct → winget (last resort)
         # winget has UWP/COM limitations as SYSTEM; Chocolatey is purpose-built for headless installs.
@@ -1205,7 +1218,23 @@ function Show-VerificationReport {
         }
         if ($exe) {
             $exeCmd = if ($exe -is [string]) { $exe } else { $exe.Source }
-            $ver = (& $exeCmd @($c.Args) 2>&1 | Select-Object -First 1) -replace '\s+$',''
+            # Run version check in a background job with an 8-second timeout.
+            # Some CLI wrappers (e.g. VS Code's code.cmd) hang indefinitely under
+            # SYSTEM context waiting for a UI/server connection.
+            $ver = try {
+                $job = Start-Job -ScriptBlock {
+                    param($exe, $arg)
+                    & $exe $arg 2>&1 | Select-Object -First 1
+                } -ArgumentList $exeCmd, $c.Args[0]
+                if ($job | Wait-Job -Timeout 8) {
+                    $out = Receive-Job $job
+                    Remove-Job $job -ErrorAction SilentlyContinue
+                    ($out | Select-Object -First 1) -replace '\s+$',''
+                } else {
+                    Remove-Job $job -Force -ErrorAction SilentlyContinue
+                    'installed (version check timed out)'
+                }
+            } catch { 'installed (check error)' }
             $row = "  {0,-15} OK   {1}" -f $c.Label, $ver
             Write-Log $row 'OK'
             $lines += $row

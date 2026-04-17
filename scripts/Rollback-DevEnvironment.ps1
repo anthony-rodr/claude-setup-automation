@@ -731,6 +731,35 @@ foreach ($item in $forceRemove) {
     }
 }
 
+# When tool directories are force-removed the Windows Uninstall registry entries may
+# still be present. Chocolatey reads these entries to decide whether a package is
+# already installed — if the entry survives a rollback, the next choco upgrade will
+# say "already latest" and skip reinstalling even though the files are gone.
+# Scrub registry entries for tools whose directories we just removed.
+$regCleanPatterns = @(
+    @{ Dir = 'C:\Program Files\Microsoft VS Code'; Pattern = '*Visual Studio Code*' }
+    @{ Dir = 'C:\Program Files\Git';               Pattern = '*Git*'                }
+    @{ Dir = 'C:\Program Files\PowerShell';        Pattern = '*PowerShell*7*'       }
+    @{ Dir = 'C:\Program Files\GitHub CLI';        Pattern = '*GitHub CLI*'         }
+)
+$uninstallRoots = @(
+    'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall',
+    'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall'
+)
+foreach ($rc in $regCleanPatterns) {
+    if (-not (Test-Path $rc.Dir)) {
+        foreach ($root in $uninstallRoots) {
+            Get-ChildItem $root -ErrorAction SilentlyContinue | ForEach-Object {
+                $e = Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue
+                if ($e -and $e.DisplayName -like $rc.Pattern) {
+                    Remove-Item $_.PSPath -Recurse -Force -ErrorAction SilentlyContinue
+                    Write-Log "  Removed registry entry: $($e.DisplayName)" 'DIAG'
+                }
+            }
+        }
+    }
+}
+
 # Clean nvm / nodejs env vars
 foreach ($var in @('NVM_HOME','NVM_SYMLINK')) {
     if ([System.Environment]::GetEnvironmentVariable($var, 'Machine')) {
@@ -910,6 +939,20 @@ foreach ($td in $tempDirs) {
             Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue
             Write-Log "  Removed temp file: $($_.FullName)" 'OK'
         }
+    }
+}
+
+# Chocolatey temp leftovers — choco writes per-session cache to AppData\Local\Temp\chocolatey
+# Clean this for all user profiles and for the SYSTEM/Windows temp location.
+$skipProfiles = @('systemprofile','LocalService','NetworkService','defaultuser0','Default','All Users','Public')
+$chocoTempDirs = @('C:\Windows\Temp\chocolatey') +
+    (Get-ChildItem 'C:\Users' -Directory -ErrorAction SilentlyContinue |
+     Where-Object { $_.Name -notin $skipProfiles } |
+     ForEach-Object { Join-Path $_.FullName 'AppData\Local\Temp\chocolatey' })
+foreach ($ct in $chocoTempDirs) {
+    if (Test-Path $ct) {
+        Remove-Item $ct -Recurse -Force -ErrorAction SilentlyContinue
+        Write-Log "  Removed chocolatey temp: $ct" 'OK'
     }
 }
 
