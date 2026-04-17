@@ -731,34 +731,72 @@ foreach ($item in $forceRemove) {
     }
 }
 
-# When tool directories are force-removed the Windows Uninstall registry entries may
-# still be present. Chocolatey reads these entries to decide whether a package is
-# already installed — if the entry survives a rollback, the next choco upgrade will
-# say "already latest" and skip reinstalling even though the files are gone.
-# Scrub registry entries for tools whose directories we just removed.
-$regCleanPatterns = @(
-    @{ Dir = 'C:\Program Files\Microsoft VS Code'; Pattern = '*Visual Studio Code*' }
-    @{ Dir = 'C:\Program Files\Git';               Pattern = '*Git*'                }
-    @{ Dir = 'C:\Program Files\PowerShell';        Pattern = '*PowerShell*7*'       }
-    @{ Dir = 'C:\Program Files\GitHub CLI';        Pattern = '*GitHub CLI*'         }
+# Unconditionally scrub HKLM Windows Uninstall registry entries for all managed tools.
+# Ghost entries in Programs & Features block choco from reinstalling (it sees
+# "already latest") and show up as installed even after files are gone.
+# Note: Python Launcher has a dedicated Invoke-RegistryUninstall call below — exclude
+# it here so its uninstaller still runs before we clean up its key.
+$managedUninstallPatterns = @(
+    '*Visual Studio Code*'
+    '*Git version*'
+    '*Git*'
+    '*PowerShell*7*'
+    '*GitHub CLI*'
+    '*Node.js*'
+    '*Python 3.*'
+    '*AWS Command Line Interface*'
+    '*Terraform*'
+    '*Docker Desktop*'
 )
 $uninstallRoots = @(
     'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall',
     'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall'
 )
-foreach ($rc in $regCleanPatterns) {
-    if (-not (Test-Path $rc.Dir)) {
-        foreach ($root in $uninstallRoots) {
-            Get-ChildItem $root -ErrorAction SilentlyContinue | ForEach-Object {
-                $e = Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue
-                if ($e -and $e.DisplayName -like $rc.Pattern) {
-                    Remove-Item $_.PSPath -Recurse -Force -ErrorAction SilentlyContinue
-                    Write-Log "  Removed registry entry: $($e.DisplayName)" 'DIAG'
-                }
+foreach ($pattern in $managedUninstallPatterns) {
+    foreach ($root in $uninstallRoots) {
+        Get-ChildItem $root -ErrorAction SilentlyContinue | ForEach-Object {
+            $e  = Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue
+            $dn = if ($e -and $e.PSObject.Properties['DisplayName']) { $e.PSObject.Properties['DisplayName'].Value } else { $null }
+            if ($dn -and $dn -like $pattern) {
+                Remove-Item $_.PSPath -Recurse -Force -ErrorAction SilentlyContinue
+                Write-Log "  Removed HKLM registry entry: $dn" 'DIAG'
             }
         }
     }
 }
+
+# Also scan user registry hives — VS Code user-scoped installs register under
+# HKCU, not HKLM, so the HKLM pass above misses them entirely.
+$skipHiveUsers = @('systemprofile','LocalService','NetworkService','defaultuser0','Default','All Users','Public')
+Get-ChildItem 'C:\Users' -Directory -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -notin $skipHiveUsers -and (Test-Path (Join-Path $_.FullName 'NTUSER.DAT')) } |
+    ForEach-Object {
+        $uname    = $_.Name
+        $hivePath = Join-Path $_.FullName 'NTUSER.DAT'
+        $hiveKey  = "HKU\MEClean_$uname"
+        try {
+            & reg load $hiveKey $hivePath 2>&1 | Out-Null
+            $hkuUninstall = "Registry::HKEY_USERS\MEClean_$uname\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"
+            if (Test-Path $hkuUninstall) {
+                foreach ($pattern in $managedUninstallPatterns) {
+                    Get-ChildItem $hkuUninstall -ErrorAction SilentlyContinue | ForEach-Object {
+                        $e  = Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue
+                        $dn = if ($e -and $e.PSObject.Properties['DisplayName']) { $e.PSObject.Properties['DisplayName'].Value } else { $null }
+                        if ($dn -and $dn -like $pattern) {
+                            Remove-Item $_.PSPath -Recurse -Force -ErrorAction SilentlyContinue
+                            Write-Log "  Removed HKCU registry entry ($uname): $dn" 'DIAG'
+                        }
+                    }
+                }
+            }
+        } catch {
+            Write-Log "  Could not scan user hive for ${uname}: $_" 'WARN'
+        } finally {
+            [gc]::Collect()
+            [gc]::WaitForPendingFinalizers()
+            & reg unload $hiveKey 2>&1 | Out-Null
+        }
+    }
 
 # Clean nvm / nodejs env vars
 foreach ($var in @('NVM_HOME','NVM_SYMLINK')) {

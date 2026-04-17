@@ -185,16 +185,17 @@ $Packages = @(
         DType  = 'exe'
     }
     @{
-        Name   = 'Visual Studio Code'
-        Roles  = @('Core', 'Dev', 'CloudOps', 'All')
-        Winget = 'Microsoft.VisualStudioCode'
-        Choco  = 'vscode'
-        Direct = {
+        Name      = 'Visual Studio Code'
+        Roles     = @('Core', 'Dev', 'CloudOps', 'All')
+        Winget    = 'Microsoft.VisualStudioCode'
+        Choco     = 'vscode'
+        VerifyExe = 'C:\Program Files\Microsoft VS Code\Code.exe'
+        Direct    = {
             # The /latest redirect resolves to the current stable installer
             'https://update.code.visualstudio.com/latest/win32-x64/stable'
         }
-        DArgs  = '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /MERGETASKS=!runcode,addcontextmenufiles,addcontextmenufolders,associatewithfiles,addtopath'
-        DType  = 'exe'
+        DArgs     = '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /MERGETASKS=!runcode,addcontextmenufiles,addcontextmenufolders,associatewithfiles,addtopath'
+        DType     = 'exe'
     }
     @{
         Name   = 'PowerShell 7'
@@ -522,6 +523,14 @@ function Install-ViaChocolatey {
         if ($LASTEXITCODE -eq 0 -or $pkgAlreadyPresent) {
             Write-Log "  choco OK: $id" 'OK'
             Write-Log "  choco output: $raw" 'DIAG'
+            # If VerifyExe is defined and the binary is absent, choco hit a ghost registry
+            # entry and skipped the actual install.  Force a reinstall to lay down the files.
+            $verifyExe = if ($Pkg.ContainsKey('VerifyExe')) { $Pkg['VerifyExe'] } else { $null }
+            if ($verifyExe -and -not (Test-Path $verifyExe)) {
+                Write-Log "  VerifyExe missing after choco ($verifyExe) — forcing reinstall…" 'WARN'
+                $out2 = & choco install $id --yes --no-progress --force 2>&1
+                Write-Log "  choco --force output: $($out2 -join "`n")" 'DIAG'
+            }
             return $true
         }
 
@@ -625,8 +634,9 @@ function Install-ViaDirectDownload {
                     $entry = Get-ItemProperty $uninstallKeys -ErrorAction SilentlyContinue |
                              Where-Object { $_.PSObject.Properties['DisplayName'] -and $_.DisplayName -like "*$($Pkg.Name)*" } |
                              Select-Object -First 1
-                    if ($entry -and $entry.UninstallString) {
-                        $us = $entry.UninstallString
+                    $usProp = if ($entry) { $entry.PSObject.Properties['UninstallString'] } else { $null }
+                    if ($usProp -and $usProp.Value) {
+                        $us = $usProp.Value
                         if ($us -match 'msiexec') {
                             $code = [regex]::Match($us, '\{[^}]+\}').Value
                             Start-Process msiexec.exe -ArgumentList "/x $code /quiet /norestart" -Wait -NoNewWindow | Out-Null
@@ -730,8 +740,10 @@ function Install-Package {
 
     # Pre-check: if VerifyCmd is defined and the tool is already functional, skip install entirely.
     # Handles cases where the tool was installed manually or by a prior run that left it working.
-    if ($Pkg.VerifyCmd -and (Get-Command $Pkg.VerifyCmd -ErrorAction SilentlyContinue)) {
-        $existVer = try { (& $Pkg.VerifyCmd '--version' 2>&1 | Select-Object -First 1) -replace '\s+$','' } catch { 'present' }
+    # Use ContainsKey to avoid StrictMode throwing on packages that don't define this property.
+    $preCheckCmd = if ($Pkg.ContainsKey('VerifyCmd')) { $Pkg['VerifyCmd'] } else { $null }
+    if ($preCheckCmd -and (Get-Command $preCheckCmd -ErrorAction SilentlyContinue)) {
+        $existVer = try { (& $preCheckCmd '--version' 2>&1 | Select-Object -First 1) -replace '\s+$','' } catch { 'present' }
         Write-Log "  $($Pkg.Name) already installed ($existVer) — skipping." 'OK'
         $entry.Method  = 'pre-existing'
         $entry.Success = $true
@@ -920,7 +932,11 @@ proxy: none
             }
         }
 
-        if (Get-Command node -ErrorAction SilentlyContinue) {
+        if ($symlinkProbe) {
+            $nodeOk = $true
+            $nodeVer = try { & (Join-Path $symlinkProbe 'node.exe') --version 2>&1 } catch { 'unknown' }
+            Write-Log "  Node.js installed via nvm: $nodeVer" 'OK'
+        } elseif (Get-Command node -ErrorAction SilentlyContinue) {
             $nodeOk = $true
             Write-Log "  Node.js installed via nvm: $(& node --version 2>&1)" 'OK'
         } else {
