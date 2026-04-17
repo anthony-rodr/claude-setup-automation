@@ -212,10 +212,10 @@ $Packages = @(
     @{
         Name    = 'nvm-windows'
         Roles   = @('Dev', 'All')
-        Winget  = 'CoreyButler.NVMforWindows'
+        Winget  = $null     # winget installs nvm per-user (AppData) — must be machine-wide for all users
         Choco   = $null     # choco nvm silently no-ops as SYSTEM
-        # Use nvm-noinstall.zip — raw binary only, no installer UI at all.
-        # We write settings.txt and set registry vars ourselves in Install-ClaudeCode.
+        # nvm-noinstall.zip extracts nvm.exe to ZipDest — machine-wide, no installer UI.
+        # We write settings.txt and set machine env vars in Install-ClaudeCode.
         Direct  = {
             $r = Invoke-RestMethod 'https://api.github.com/repos/coreybutler/nvm-windows/releases/latest'
             ($r.assets | Where-Object { $_.name -eq 'nvm-noinstall.zip' }).browser_download_url
@@ -425,7 +425,7 @@ function Install-ViaWinget {
         # Try upgrade first — no-ops if already at latest, reports "No installed package found" if absent
         Write-Log "  winget upgrade $id (attempt $i)…" 'DIAG'
         $out = & winget upgrade --id $id --silent `
-               --accept-package-agreements --accept-source-agreements 2>&1
+               --accept-package-agreements --accept-source-agreements --scope machine 2>&1
         $raw = ($out -join "`n")
 
         if ($LASTEXITCODE -eq 0 -or $raw -match '(?i)no applicable upgrade|already installed') {
@@ -644,14 +644,17 @@ function Install-ViaDirectDownload {
                             else { $unExe = ($us -split ' ',2)[0]; $unArgs = ($us -split ' ',2)[1] }
                             Start-Process $unExe -ArgumentList "$unArgs /SILENT /NORESTART" -Wait -NoNewWindow | Out-Null
                         }
-                        Write-Log "  Registry uninstall complete — retrying install…" 'DIAG'
+                        Write-Log "  Registry uninstall complete." 'DIAG'
                     } else {
-                        # No UninstallString in registry (stub entry, Store install, or incomplete uninstall).
-                        # Try the installer's own /uninstall switch — works for Python, NSIS, and many others.
-                        Write-Log "  No registry UninstallString found — trying installer /uninstall switch…" 'WARN'
-                        $pUn = Start-Process $tmpFile -ArgumentList '/quiet /uninstall' -Wait -PassThru -NoNewWindow
-                        Write-Log "  Installer /uninstall exited $($pUn.ExitCode)" 'DIAG'
+                        Write-Log "  No registry UninstallString found." 'WARN'
                     }
+                    # Always run the bundled installer's own /uninstall after any registry-based
+                    # attempt.  Python bundles several sub-MSIs (Executables, Standard Library,
+                    # pip, etc.) — the registry uninstall only removes the wrapper product code.
+                    # The EXE /uninstall removes every sub-MSI atomically, clearing 1638 reliably.
+                    Write-Log "  Running installer /uninstall to remove all sub-components…" 'DIAG'
+                    $pUn = Start-Process $tmpFile -ArgumentList '/quiet /uninstall' -Wait -PassThru -NoNewWindow
+                    Write-Log "  Installer /uninstall exited $($pUn.ExitCode)" 'DIAG'
                     # Clean MSI product database — Python's EXE installer checks
                     # HKLM\SOFTWARE\Classes\Installer\Products\ (MSI internal DB), which
                     # survives ordinary Uninstall key deletion and causes persistent 1638.
@@ -945,73 +948,9 @@ proxy: none
         Write-Log "  Node.js already present: $(& node --version 2>&1)" 'DIAG'
     }
 
-    # Tier 1 — nvm (use full path to $nvmExe; bypasses command-cache issues)
-    if (-not $nodeOk -and $nvmExe) {
-        Write-Log '  Installing Node.js LTS via nvm…' 'DIAG'
-        & $nvmExe install lts 2>&1 | ForEach-Object { Write-Log "    [nvm] $_" 'DIAG' }
-        & $nvmExe use lts     2>&1 | ForEach-Object { Write-Log "    [nvm] $_" 'DIAG' }
-        Update-SessionPath
-
-        # Detect the activated symlink path and add it to PATH if needed
-        $symlinkProbe = @('C:\Program Files\nodejs', 'C:\nvm4w\nodejs') |
-            Where-Object { Test-Path (Join-Path $_ 'node.exe') } | Select-Object -First 1
-        if ($symlinkProbe) {
-            if ($env:Path -notlike "*$symlinkProbe*") { $env:Path = "$env:Path;$symlinkProbe" }
-            if (-not [System.Environment]::GetEnvironmentVariable('NVM_SYMLINK', 'Machine')) {
-                [System.Environment]::SetEnvironmentVariable('NVM_SYMLINK', $symlinkProbe, 'Machine')
-                Write-Log "  NVM_SYMLINK updated to: $symlinkProbe" 'OK'
-            }
-        }
-
-        if ($symlinkProbe) {
-            $nodeOk = $true
-            $nodeVer = try { & (Join-Path $symlinkProbe 'node.exe') --version 2>&1 } catch { 'unknown' }
-            Write-Log "  Node.js installed via nvm: $nodeVer" 'OK'
-        } elseif (Get-Command node -ErrorAction SilentlyContinue) {
-            $nodeOk = $true
-            Write-Log "  Node.js installed via nvm: $(& node --version 2>&1)" 'OK'
-        } else {
-            Write-Log '  nvm install did not produce a usable node — trying next tier.' 'WARN'
-        }
-    }
-
-    # Tier 2 — Chocolatey nodejs-lts
+    # Tier 1 — direct Node.js LTS MSI from nodejs.org (machine-wide, all users inherit from PATH)
     if (-not $nodeOk) {
-        Write-Log '  Trying Chocolatey nodejs-lts…' 'WARN'
-        if (Ensure-Chocolatey) {
-            $out = & choco upgrade nodejs-lts --yes --no-progress 2>&1
-            $raw = ($out -join "`n")
-            if ($LASTEXITCODE -eq 0 -or $raw -match '(?i)already installed|is the latest version') {
-                Write-Log '  Chocolatey nodejs-lts OK.' 'OK'
-                Update-SessionPath
-                if (Get-Command node -ErrorAction SilentlyContinue) {
-                    $nodeOk = $true
-                    Write-Log "  Node.js installed via Chocolatey: $(& node --version 2>&1)" 'OK'
-                } else {
-                    # Chocolatey installs nodejs-lts to C:\tools\nodejs which may not be in
-                    # the refreshed PATH yet in a SYSTEM session. Probe known paths directly.
-                    $chocoNodeDir = @('C:\tools\nodejs', 'C:\ProgramData\chocolatey\bin') |
-                        Where-Object { Test-Path (Join-Path $_ 'node.exe') } | Select-Object -First 1
-                    if ($chocoNodeDir) {
-                        if ($env:Path -notlike "*$chocoNodeDir*") { $env:Path = "$env:Path;$chocoNodeDir" }
-                        $mp = [System.Environment]::GetEnvironmentVariable('Path', 'Machine')
-                        if ($mp -notlike "*$chocoNodeDir*") {
-                            [System.Environment]::SetEnvironmentVariable('Path', "$mp;$chocoNodeDir", 'Machine')
-                        }
-                        $nodeOk = $true
-                        $nodeVer = try { & (Join-Path $chocoNodeDir 'node.exe') --version 2>&1 } catch { 'unknown' }
-                        Write-Log "  Node.js found via Chocolatey path probe: $nodeVer" 'OK'
-                    }
-                }
-            } else {
-                Write-Log "  Chocolatey nodejs-lts failed (exit $LASTEXITCODE): $raw" 'WARN'
-            }
-        }
-    }
-
-    # Tier 3 — direct Node.js LTS MSI from nodejs.org
-    if (-not $nodeOk) {
-        Write-Log '  Trying direct Node.js LTS MSI download…' 'WARN'
+        Write-Log '  Installing Node.js LTS via MSI (machine-wide)…' 'DIAG'
         try {
             $index  = Invoke-RestMethod 'https://nodejs.org/dist/index.json' -UseBasicParsing
             $ltsRel = $index | Where-Object { $_.lts -and $_.lts -ne $false } | Select-Object -First 1
@@ -1032,10 +971,61 @@ proxy: none
                     Write-Log "  Node.js installed via MSI: $(& node --version 2>&1)" 'OK'
                 }
             } else {
-                Write-Log "  Node.js MSI installer exited $($p.ExitCode)." 'WARN'
+                Write-Log "  Node.js MSI exited $($p.ExitCode) — trying next tier." 'WARN'
             }
         } catch {
-            Write-Log "  Direct Node.js download/install failed: $_" 'WARN'
+            Write-Log "  Direct Node.js MSI failed: $_ — trying next tier." 'WARN'
+        }
+    }
+
+    # Tier 2 — nvm install lts (nvm is machine-wide via C:\ProgramData\nvm)
+    if (-not $nodeOk -and $nvmExe) {
+        Write-Log '  Installing Node.js LTS via nvm…' 'DIAG'
+        & $nvmExe install lts 2>&1 | ForEach-Object { Write-Log "    [nvm] $_" 'DIAG' }
+        & $nvmExe use lts     2>&1 | ForEach-Object { Write-Log "    [nvm] $_" 'DIAG' }
+        Update-SessionPath
+        # nvm symlink is NVM_SYMLINK (C:\Program Files\nodejs) — set by Install-ClaudeCode above
+        $nvmNodePath = [System.Environment]::GetEnvironmentVariable('NVM_SYMLINK', 'Machine')
+        if ($nvmNodePath -and (Test-Path (Join-Path $nvmNodePath 'node.exe'))) {
+            if ($env:Path -notlike "*$nvmNodePath*") { $env:Path = "$env:Path;$nvmNodePath" }
+            $nodeOk = $true
+            $nodeVer = try { & (Join-Path $nvmNodePath 'node.exe') --version 2>&1 } catch { 'unknown' }
+            Write-Log "  Node.js installed via nvm: $nodeVer" 'OK'
+        } elseif (Get-Command node -ErrorAction SilentlyContinue) {
+            $nodeOk = $true
+            Write-Log "  Node.js installed via nvm: $(& node --version 2>&1)" 'OK'
+        } else {
+            Write-Log '  nvm install did not produce a usable node — trying next tier.' 'WARN'
+        }
+    }
+
+    # Tier 3 — Chocolatey nodejs-lts
+    if (-not $nodeOk) {
+        Write-Log '  Trying Chocolatey nodejs-lts…' 'WARN'
+        if (Ensure-Chocolatey) {
+            $out = & choco upgrade nodejs-lts --yes --no-progress 2>&1
+            $raw = ($out -join "`n")
+            if ($LASTEXITCODE -eq 0 -or $raw -match '(?i)already installed|is the latest version') {
+                Write-Log '  Chocolatey nodejs-lts OK.' 'OK'
+                Update-SessionPath
+                $chocoNodeDir = @('C:\tools\nodejs', 'C:\ProgramData\chocolatey\bin') |
+                    Where-Object { Test-Path (Join-Path $_ 'node.exe') } | Select-Object -First 1
+                if (Get-Command node -ErrorAction SilentlyContinue) {
+                    $nodeOk = $true
+                    Write-Log "  Node.js installed via Chocolatey: $(& node --version 2>&1)" 'OK'
+                } elseif ($chocoNodeDir) {
+                    if ($env:Path -notlike "*$chocoNodeDir*") { $env:Path = "$env:Path;$chocoNodeDir" }
+                    $mp = [System.Environment]::GetEnvironmentVariable('Path', 'Machine')
+                    if ($mp -notlike "*$chocoNodeDir*") {
+                        [System.Environment]::SetEnvironmentVariable('Path', "$mp;$chocoNodeDir", 'Machine')
+                    }
+                    $nodeOk = $true
+                    $nodeVer = try { & (Join-Path $chocoNodeDir 'node.exe') --version 2>&1 } catch { 'unknown' }
+                    Write-Log "  Node.js found via Chocolatey path probe: $nodeVer" 'OK'
+                }
+            } else {
+                Write-Log "  Chocolatey nodejs-lts failed (exit $LASTEXITCODE): $raw" 'WARN'
+            }
         }
     }
 
