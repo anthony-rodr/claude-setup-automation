@@ -15,3 +15,6 @@ package-lock.json
 .vscode/settings.json
 Thumbs.db
 Desktop.ini
+
+# Local reference docs
+COMMANDS.md
