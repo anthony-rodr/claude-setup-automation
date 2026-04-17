@@ -64,7 +64,7 @@ try {
 
     # 5. Run installer
     Write-Step "Starting installation…"
-    & $installScript.FullName -Force
+    & $installScript.FullName
     Write-Step "Installation script completed with exit code: $LASTEXITCODE"
     exit $LASTEXITCODE
 
