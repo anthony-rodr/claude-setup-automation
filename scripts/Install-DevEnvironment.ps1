@@ -318,8 +318,7 @@ $Packages = @(
 # ─────────────────────────────────────────────────────────────────────────────
 $VsCodeExtensions = @(
     'ms-vscode.PowerShell'
-    'ms-python.python'
-    'ms-python.pylance'
+    'ms-python.python'        # Pylance ships as a dependency — no separate entry needed
     'hashicorp.terraform'
     'amazonwebservices.aws-toolkit-vscode'
     'GitHub.vscode-pull-request-github'

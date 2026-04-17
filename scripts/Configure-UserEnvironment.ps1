@@ -424,9 +424,11 @@ function Install-VsCodeExtensions {
     $baseArgs = if ($runningAsUser) {
         @()
     } else {
-        $userDataDir = Join-Path $UserProfile 'AppData\Roaming\Code'
+        $userDataDir  = Join-Path $UserProfile 'AppData\Roaming\Code'
+        $extDir       = Join-Path $UserProfile '.vscode\extensions'
         Ensure-Dir $userDataDir
-        @('--user-data-dir', $userDataDir)
+        Ensure-Dir $extDir
+        @('--user-data-dir', $userDataDir, '--extensions-dir', $extDir)
     }
 
     foreach ($ext in $extensions) {
