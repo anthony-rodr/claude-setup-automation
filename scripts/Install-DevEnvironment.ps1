@@ -831,6 +831,25 @@ function Install-ViaDirectDownload {
                     }
                 }
                 if ($p.ExitCode -notin @(0, 3010)) { throw "Exit code $($p.ExitCode)" }
+                # EXE installers (Python) may spawn child msiexec processes and exit before
+                # the actual installation completes.  If AltPaths are defined, poll until
+                # the expected executable appears (up to 90 s), then refresh session PATH.
+                if ($Pkg.ContainsKey('AltPaths') -and $Pkg['AltPaths']) {
+                    $deadline  = (Get-Date).AddSeconds(90)
+                    $foundDir  = $null
+                    while (-not $foundDir -and (Get-Date) -lt $deadline) {
+                        $foundDir = $Pkg.AltPaths | Where-Object { Test-Path "$_\python.exe" } | Select-Object -First 1
+                        if (-not $foundDir) { Start-Sleep -Seconds 5 }
+                    }
+                    if (-not $foundDir) {
+                        throw "Exit $($p.ExitCode) but python.exe not found at any AltPath after 90 s — child installer likely failed silently"
+                    }
+                    Write-Log "  python.exe confirmed at: $foundDir" 'DIAG'
+                    if ($env:Path -notlike "*$foundDir*") {
+                        $env:Path = "$env:Path;$foundDir"
+                        Write-Log "  Session PATH refreshed to include: $foundDir" 'DIAG'
+                    }
+                }
             }
             'exe-args' {
                 # Args are passed as a single string to the EXE (e.g. Docker Desktop)
@@ -838,7 +857,9 @@ function Install-ViaDirectDownload {
                 if ($p.ExitCode -notin @(0, 3010)) { throw "Exit code $($p.ExitCode)" }
             }
             'msi' {
-                $p = Start-Process msiexec.exe -ArgumentList "/i `"$tmpFile`" $($Pkg.DArgs)" `
+                # msiexec.exe cannot resolve '..' in paths — resolve to full absolute path first.
+                $resolvedMsi = [System.IO.Path]::GetFullPath($tmpFile)
+                $p = Start-Process msiexec.exe -ArgumentList "/i `"$resolvedMsi`" $($Pkg.DArgs)" `
                      -Wait -PassThru -NoNewWindow
                 if ($p.ExitCode -notin @(0, 3010)) { throw "msiexec exit $($p.ExitCode)" }
             }
@@ -1406,6 +1427,14 @@ function Show-VerificationReport {
         }
         @{ Label = 'AWS CLI';      Cmd = 'aws';       Args = @('--version') }
         @{ Label = 'Terraform';    Cmd = 'terraform'; Args = @('--version') }
+        @{ Label = 'Keeper Cmdr';  Cmd = 'keeper';    Args = @('--version')
+           FallbackExes = @(
+               'C:\Program Files\Python312\Scripts\keeper.exe',
+               'C:\Python312\Scripts\keeper.exe',
+               'C:\ProgramData\chocolatey\bin\keeper.exe'
+           )
+        }
+        @{ Label = 'Claude Desktop'; AppxQuery = '*claude*' }
     )
 
     $lines  = @("=== INSTALLATION VERIFICATION  $ts ===")
@@ -1418,6 +1447,24 @@ function Show-VerificationReport {
     Write-Log ('─' * 64) 'INFO'
 
     foreach ($c in $checks) {
+        # AppxQuery entries — MSIX/UWP apps verified via provisioned package list, not CLI
+        if ($c.ContainsKey('AppxQuery')) {
+            $pkg = Get-AppxProvisionedPackage -Online -ErrorAction SilentlyContinue |
+                   Where-Object { $_.DisplayName -like $c['AppxQuery'] } |
+                   Select-Object -First 1
+            if ($pkg) {
+                $row = "  {0,-15} OK   {1}" -f $c.Label, $pkg.DisplayName
+                Write-Log $row 'OK'
+                $lines += $row
+                $pass++
+            } else {
+                $row = "  {0,-15} NOT FOUND" -f $c.Label
+                Write-Log $row 'WARN'
+                $lines += $row
+                $fail++
+            }
+            continue
+        }
         $exe = Get-Command $c.Cmd -ErrorAction SilentlyContinue
         # For tools with fallback paths, also check known install locations when
         # Get-Command misses them (e.g. Python in a new SYSTEM session before PATH refresh)
@@ -1600,6 +1647,9 @@ Write-Log '' 'INFO'
 Write-Log ('=' * 64) 'INFO'
 Write-Log '  INSTALLATION COMPLETE' 'INFO'
 Write-Log ('=' * 64) 'INFO'
+$elapsed = [datetime]$Manifest.EndTime - [datetime]$Manifest.StartTime
+$dur = '{0:D2}m {1:D2}s' -f [int]$elapsed.TotalMinutes, $elapsed.Seconds
+Write-Log "Duration           : $dur" 'INFO'
 Write-Log "Packages attempted : $($Manifest.Packages.Count)" 'INFO'
 Write-Log "Failures           : $failCount" $(if ($failCount -gt 0) { 'FAIL' } else { 'OK' })
 
