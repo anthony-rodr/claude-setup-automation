@@ -23,13 +23,13 @@ This is NOT run on the dev machine. Never confuse the two.
 
 ## Install architecture (runs on remote machines as SYSTEM)
 Order of operations in `Install-DevEnvironment.ps1`:
-1. **Bulk Choco install** — `choco install scripts/packages.config` once before the per-package loop
-2. **Per-package loop** with three tiers per package:
-   - **Tier 0**: Bundled installer in `bundled/` — skips Choco entirely for that package
-   - **Tier 1**: Chocolatey
-   - **Tier 2**: Direct download
+1. **Bulk Choco install** — `choco install scripts/packages.config` for packages with NO bundled version
+2. **Per-package loop** with four tiers per package:
+   - **Tier 0**: Bundled installer in `bundled/` — local, no network, fastest
+   - **Tier 1**: Chocolatey fallback
+   - **Tier 2**: Direct download fallback
    - **Tier 3**: winget (last resort — unreliable as SYSTEM)
-3. **Parallel profile config** — all existing user profiles configured simultaneously via Start-Job
+3. **Parallel profile config** — all existing user profiles configured simultaneously via Start-Job (~74s vs 13min sequential)
 
 ## What's bundled (Package-Release.ps1 downloads these)
 Ships inside the zip — no network needed on target machine:
@@ -42,13 +42,20 @@ Ships inside the zip — no network needed on target machine:
 | `ME_GitHub_CLI.msi` | GitHub CLI |
 | `ME_Terraform.zip` | Terraform |
 
-**Not bundled** (too large or Choco handles reliably):
-- Docker Desktop (~600 MB) — Choco
-- PowerShell 7 (~100 MB) — Choco
+**Not bundled** (size trade-off — Choco downloads at install time):
+- Docker Desktop (~600 MB) — Choco + direct fallback
+- PowerShell 7 (~100 MB) — Choco + direct fallback
 
-## packages.config (Choco bulk list)
-Lists all 7 Choco-installable packages: git, vscode, powershell-core, gh, docker-desktop, awscli, terraform.
-Stays comprehensive — Tier 0 handles bundled ones before Choco gets a chance in the per-package loop.
+## packages.config (Choco bulk list — non-bundled packages only)
+Only lists packages with NO bundled installer: `powershell-core`, `docker-desktop`, `claude`
+Bundled packages (git, vscode, gh, awscli, terraform) are intentionally excluded — they use
+Tier 0 (local) first, Choco only if that fails. Putting them in packages.config caused Choco
+to download them from the internet before Tier 0 could run (~7 min wasted per deployment).
+
+## New packages added (session 4)
+- **Keeper Commander** (`DType = 'pip'`, `PipPkg = 'keepercommander'`) — pip install via machine Python 3.12
+- **Claude Desktop** (`Choco = 'claude'`, `DType = 'msix'`) — Choco primary, MSIX direct fallback from Anthropic CDN
+  - MSIX handler uses `Add-AppxProvisionedPackage` (machine-wide, all users) not `Add-AppxPackage` (per-user, fails as SYSTEM)
 
 ## Key design decisions
 - **Python has `Choco = $null`** — choco python312 exits 1638 when registry remnants exist
@@ -56,9 +63,31 @@ Stays comprehensive — Tier 0 handles bundled ones before Choco gets a chance i
 - **nvm has `Choco = $null` and `Winget = $null`** — choco nvm no-ops as SYSTEM, winget installs per-user; use nvm-noinstall.zip direct
 - **WSL2 uses `wsl.exe --install`**, not Choco or winget
 - **Claude Code installed via npm** to machine-wide prefix `C:\ProgramData\npm`
+- **Claude needed a reboot** on first test — PATH changes require new session (expected, not a bug)
+- **VS Code shortcut shows 2/3** — VS Code installer creates its own Public Desktop shortcut, per-user copy correctly skipped
 
-## Known issues
+## First successful test run (2026-04-18)
+- Duration: **19 min 22 sec** — 12/12 packages installed, 0 failures
+- Bulk Choco was ~9 min (was downloading bundled packages — fixed in packages.config)
+- Expected time after fix: ~8–10 min (bulk step now only handles Docker + PS7 + Claude)
+- All verify checks passed. Claude required reboot before working. VS Code extensions confirmed present.
+
+## Known issues / open items
+- **Python rollback fails**: Registry uninstall string missing for machine-wide Python install.
+  Rollback falls back to winget which also fails. Python files survive rollback.
+  Fix needed: use bundled `ME_Python_3_12.exe /quiet /uninstall` in rollback script.
+- **VS Code rollback**: Earlier runs used force-remove only (left registry entries). Now uses
+  `choco uninstall vscode` + force-remove — should be clean.
 - AWS CLI choco uninstall times out in rollback — force cleanup handles it
 - WSL2 cannot be removed without a reboot
 - Rollback verification is PATH-only — can miss off-PATH installs
 - libcurl DLL conflict (from Docker/AWS CLI) breaks git HTTPS — always use SSH for pushes
+- PSScriptAnalyzer warnings in Install-DevEnvironment.ps1 (pre-existing, not from recent changes):
+  Ensure-Winget, Ensure-Chocolatey, Configure-ExistingProfiles use unapproved verbs; unused $launcherSrc; $null comparison side
+
+## Next steps (as of 2026-04-18)
+1. Run rollback with current scripts on test machine — copy new rollback.log to C:\projects\
+2. Fix Python rollback (use bundled installer /uninstall flag)
+3. Run Package-Release.ps1 to rebuild zip (scripts changed, bundled files already present in bundled/)
+4. Upload new zip: `gh release upload v1.0 claude-setup-automation.zip --clobber`
+5. Run fresh install on clean test machine — verify Keeper Commander and Claude Desktop install
