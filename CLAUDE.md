@@ -66,13 +66,22 @@ to download them from the internet before Tier 0 could run (~7 min wasted per de
 - **Claude needed a reboot** on first test — PATH changes require new session (expected, not a bug)
 - **VS Code shortcut shows 2/3** — VS Code installer creates its own Public Desktop shortcut, per-user copy correctly skipped
 
-## First successful test run (2026-04-18)
-- Duration: **19 min 22 sec** — 12/12 packages installed, 0 failures
+## Test run results
+
+### Run 1 (2026-04-18, old scripts)
+- Duration: **19 min 22 sec** — 12/12 packages, 0 failures
 - Bulk Choco was ~9 min (was downloading bundled packages — fixed in packages.config)
-- Expected time after fix: ~8–10 min (bulk step now only handles Docker + PS7 + Claude)
-- All verify checks passed. Claude required reboot before working. VS Code extensions confirmed present.
+- Claude required reboot before working (expected). VS Code extensions confirmed present.
+
+### Run 2 (2026-04-18, current scripts — packages.config fix applied)
+- ~98% successful — everything installed correctly except Python
+- Duration unknown — log files pending review
+- Python failure theory: Python Launcher may need to be installed before Python 3.12
+- **Await log files before drawing conclusions or making code changes**
 
 ## Known issues / open items
+- **Python install fails (Run 2)** — root cause unknown pending log review.
+  Theory: Python Launcher ordering. Do NOT fix until logs confirm cause.
 - **Python rollback fails**: Registry uninstall string missing for machine-wide Python install.
   Rollback falls back to winget which also fails. Python files survive rollback.
   Fix needed: use bundled `ME_Python_3_12.exe /quiet /uninstall` in rollback script.
@@ -82,12 +91,13 @@ to download them from the internet before Tier 0 could run (~7 min wasted per de
 - WSL2 cannot be removed without a reboot
 - Rollback verification is PATH-only — can miss off-PATH installs
 - libcurl DLL conflict (from Docker/AWS CLI) breaks git HTTPS — always use SSH for pushes
-- PSScriptAnalyzer warnings in Install-DevEnvironment.ps1 (pre-existing, not from recent changes):
+- PSScriptAnalyzer warnings in Install-DevEnvironment.ps1 (pre-existing):
   Ensure-Winget, Ensure-Chocolatey, Configure-ExistingProfiles use unapproved verbs; unused $launcherSrc; $null comparison side
 
 ## Next steps (as of 2026-04-18)
-1. Run rollback with current scripts on test machine — copy new rollback.log to C:\projects\
-2. Fix Python rollback (use bundled installer /uninstall flag)
-3. Run Package-Release.ps1 to rebuild zip (scripts changed, bundled files already present in bundled/)
-4. Upload new zip: `gh release upload v1.0 claude-setup-automation.zip --clobber`
-5. Run fresh install on clean test machine — verify Keeper Commander and Claude Desktop install
+1. Rollback test machine — copy all logs to C:\projects\ for review
+2. Analyze Run 2 install log to confirm Python failure root cause
+3. Fix Python install and rollback based on log findings
+4. Rebuild zip: run Package-Release.ps1 (bundled files already present, just rezipping scripts)
+5. Upload: `gh release upload v1.0 claude-setup-automation.zip --clobber`
+6. Run fresh install — verify Python, Keeper Commander, Claude Desktop
