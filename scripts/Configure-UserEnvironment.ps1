@@ -69,7 +69,7 @@ Write-Log "Running as target user: $runningAsUser" 'DIAG'
 # ─────────────────────────────────────────────────────────────────────────────
 # Helper — safely create directory
 # ─────────────────────────────────────────────────────────────────────────────
-function Ensure-Dir {
+function Initialize-Dir {
     param([string]$Path)
     if (-not (Test-Path $Path)) {
         New-Item -ItemType Directory -Path $Path -Force | Out-Null
@@ -84,7 +84,7 @@ function Set-NpmPrefix {
     $npmRcPath  = Join-Path $UserProfile '.npmrc'
     $npmGlobal  = Join-Path $UserProfile 'AppData\Roaming\npm'
 
-    Ensure-Dir $npmGlobal
+    Initialize-Dir $npmGlobal
 
     # Only write if prefix line is not already there
     $existing = if (Test-Path $npmRcPath) { Get-Content $npmRcPath -Raw } else { '' }
@@ -109,8 +109,6 @@ function Set-PowerShellProfile {
     $psWinDir      = Join-Path $UserProfile 'Documents\WindowsPowerShell'
     $psWinProfile  = Join-Path $psWinDir 'Microsoft.PowerShell_profile.ps1'
 
-    $npmGlobal = Join-Path $UserProfile 'AppData\Roaming\npm'
-
     $snippet = @"
 
 # ── Master Electronics DevSetup PATH additions ─────────────────────────────
@@ -122,7 +120,7 @@ if ((Test-Path `$npmGlobalPath) -and (`$env:Path -notlike "*`$npmGlobalPath*")) 
 "@
 
     foreach ($profilePath in @($ps7Profile, $psWinProfile)) {
-        Ensure-Dir (Split-Path $profilePath -Parent)
+        Initialize-Dir (Split-Path $profilePath -Parent)
         $existing = if (Test-Path $profilePath) { Get-Content $profilePath -Raw } else { '' }
         if ($existing -notmatch 'Master Electronics DevSetup PATH') {
             Add-Content -Path $profilePath -Value $snippet -Encoding UTF8
@@ -150,7 +148,7 @@ function Set-ClaudeSettings {
 
     $claudeDir      = Join-Path $UserProfile '.claude'
     $settingsPath   = Join-Path $claudeDir 'settings.json'
-    Ensure-Dir $claudeDir
+    Initialize-Dir $claudeDir
 
     if (Test-Path $settingsPath) {
         try {
@@ -312,7 +310,7 @@ function New-ChatbotShortcut {
         return
     }
 
-    Ensure-Dir (Split-Path $shortcut -Parent)
+    Initialize-Dir (Split-Path $shortcut -Parent)
 
     try {
         $wsh    = New-Object -ComObject WScript.Shell
@@ -335,7 +333,7 @@ function New-ChatbotShortcut {
 function New-AppShortcuts {
     $wsh     = New-Object -ComObject WScript.Shell
     $desktop = Join-Path $UserProfile 'Desktop'
-    Ensure-Dir $desktop
+    Initialize-Dir $desktop
 
     $apps = @(
         @{
@@ -426,8 +424,8 @@ function Install-VsCodeExtensions {
     } else {
         $userDataDir  = Join-Path $UserProfile 'AppData\Roaming\Code'
         $extDir       = Join-Path $UserProfile '.vscode\extensions'
-        Ensure-Dir $userDataDir
-        Ensure-Dir $extDir
+        Initialize-Dir $userDataDir
+        Initialize-Dir $extDir
         @('--user-data-dir', $userDataDir, '--extensions-dir', $extDir)
     }
 
@@ -561,7 +559,7 @@ Show-VerificationReport
 # Write marker so the logon task exits immediately on subsequent logins.
 # Extensions are now installed during the SYSTEM run (via --user-data-dir), so
 # the marker is written regardless of which account ran this script.
-Ensure-Dir (Join-Path $UserProfile '.claude')
+Initialize-Dir (Join-Path $UserProfile '.claude')
 Set-Content $MarkerFile -Value (Get-Date -Format 'o') -Encoding UTF8
 Write-Log 'Configuration complete. Marker file written.' 'OK'
 
