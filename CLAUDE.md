@@ -54,8 +54,10 @@ to download them from the internet before Tier 0 could run (~7 min wasted per de
 
 ## New packages added (session 4)
 - **Keeper Commander** (`DType = 'pip'`, `PipPkg = 'keepercommander'`) — pip install via machine Python 3.12
+  - **Did NOT install in Run 2** — likely because Python failed first; pip has no Python to run against
 - **Claude Desktop** (`Choco = 'claude'`, `DType = 'msix'`) — Choco primary, MSIX direct fallback from Anthropic CDN
   - MSIX handler uses `Add-AppxProvisionedPackage` (machine-wide, all users) not `Add-AppxPackage` (per-user, fails as SYSTEM)
+  - **Not yet tested** — needs verification on next clean install run
 
 ## Key design decisions
 - **Python has `Choco = $null`** — choco python312 exits 1638 when registry remnants exist
