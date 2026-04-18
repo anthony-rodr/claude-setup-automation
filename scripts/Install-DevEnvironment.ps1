@@ -609,7 +609,10 @@ function Install-ViaDirectDownload {
         if (-not $pythonExe) {
             $candidates = @(
                 'C:\Program Files\Python312\python.exe',
-                'C:\Python312\python.exe'
+                'C:\Program Files\Python313\python.exe',
+                'C:\Program Files\Python311\python.exe',
+                'C:\Python312\python.exe',
+                'C:\Python3\python.exe'
             )
             $pythonExe = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
         }
@@ -845,9 +848,13 @@ function Install-ViaDirectDownload {
                         throw "Exit $($p.ExitCode) but python.exe not found at any AltPath after 90 s — child installer likely failed silently"
                     }
                     Write-Log "  python.exe confirmed at: $foundDir" 'DIAG'
-                    if ($env:Path -notlike "*$foundDir*") {
-                        $env:Path = "$env:Path;$foundDir"
-                        Write-Log "  Session PATH refreshed to include: $foundDir" 'DIAG'
+                    # Add both the Python root and Scripts\ so pip-installed tools
+                    # (e.g. keeper.exe) are immediately findable in this session.
+                    foreach ($addDir in @($foundDir, "$foundDir\Scripts")) {
+                        if ($env:Path -notlike "*$addDir*") {
+                            $env:Path = "$env:Path;$addDir"
+                            Write-Log "  Session PATH refreshed to include: $addDir" 'DIAG'
+                        }
                     }
                 }
             }
