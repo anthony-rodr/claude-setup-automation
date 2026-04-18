@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     Builds the claude-setup-automation.zip release package.
@@ -74,7 +74,7 @@ Write-Step 'Creating bundled/ directory…'
 New-Item -ItemType Directory -Path $BundledDir -Force | Out-Null
 
 $manifest = [System.Collections.Generic.List[pscustomobject]]::new()
-$buildDate = Get-Date -Format 'yyyy-MM-dd HH:mm:ss UTC' -AsUTC
+$buildDate = (Get-Date).ToUniversalTime().ToString('yyyy-MM-dd HH:mm:ss UTC')
 
 # ── 2. VS Code (always-latest redirect, no version in URL) ────────────────────
 Write-Step 'Resolving VS Code installer…'
@@ -94,7 +94,7 @@ try {
     $sz = Invoke-Fetch $git.Url (Join-Path $BundledDir 'ME_Git_for_Windows.exe')
     $manifest.Add([pscustomobject]@{ Package='Git for Windows'; Version=$git.Version; File='ME_Git_for_Windows.exe'; SizeMB=[math]::Round($sz,1) })
 } catch {
-    Write-Step "  WARNING: Git download failed: $_ — skipping." 'Yellow'
+    Write-Step "  WARNING: Git download failed: $_ - skipping." 'Yellow'
 }
 
 # ── 4. AWS CLI v2 (Amazon provides a stable always-latest URL) ────────────────
@@ -103,7 +103,7 @@ try {
     $sz = Invoke-Fetch 'https://awscli.amazonaws.com/AWSCLIV2.msi' (Join-Path $BundledDir 'ME_AWS_CLI_v2.msi')
     $manifest.Add([pscustomobject]@{ Package='AWS CLI v2'; Version='latest'; File='ME_AWS_CLI_v2.msi'; SizeMB=[math]::Round($sz,1) })
 } catch {
-    Write-Step "  WARNING: AWS CLI download failed: $_ — skipping." 'Yellow'
+    Write-Step "  WARNING: AWS CLI download failed: $_ - skipping." 'Yellow'
 }
 
 # ── 5. Python 3.12 ───────────────────────────────────────────────────────────
@@ -117,7 +117,7 @@ try {
     $asset = $rel.assets | Where-Object { $_.name -match 'amd64\.exe$' } | Select-Object -First 1
     if ($asset) { $pythonUrl = $asset.browser_download_url; $pythonVer = $rel.tag_name }
 } catch {
-    Write-Step "  GitHub API lookup failed: $_ — using fallback URL." 'Yellow'
+    Write-Step "  GitHub API lookup failed: $_ - using fallback URL." 'Yellow'
 }
 if (-not $pythonUrl) {
     $pythonUrl = 'https://www.python.org/ftp/python/3.12.10/python-3.12.10-amd64.exe'
@@ -128,7 +128,7 @@ try {
     $sz = Invoke-Fetch $pythonUrl (Join-Path $BundledDir 'ME_Python_3_12.exe')
     $manifest.Add([pscustomobject]@{ Package='Python 3.12'; Version=$pythonVer; File='ME_Python_3_12.exe'; SizeMB=[math]::Round($sz,1) })
 } catch {
-    Write-Step "  WARNING: Python download failed: $_ — skipping." 'Yellow'
+    Write-Step "  WARNING: Python download failed: $_ - skipping." 'Yellow'
 }
 
 # ── 6. GitHub CLI ─────────────────────────────────────────────────────────────
@@ -139,7 +139,7 @@ try {
     $sz = Invoke-Fetch $gh.Url (Join-Path $BundledDir 'ME_GitHub_CLI.msi')
     $manifest.Add([pscustomobject]@{ Package='GitHub CLI'; Version=$gh.Version; File='ME_GitHub_CLI.msi'; SizeMB=[math]::Round($sz,1) })
 } catch {
-    Write-Step "  WARNING: GitHub CLI download failed: $_ — skipping." 'Yellow'
+    Write-Step "  WARNING: GitHub CLI download failed: $_ - skipping." 'Yellow'
 }
 
 # ── 7. Terraform ──────────────────────────────────────────────────────────────
@@ -152,7 +152,7 @@ try {
     $sz = Invoke-Fetch $tfUrl (Join-Path $BundledDir 'ME_Terraform.zip')
     $manifest.Add([pscustomobject]@{ Package='Terraform'; Version=$ver; File='ME_Terraform.zip'; SizeMB=[math]::Round($sz,1) })
 } catch {
-    Write-Step "  WARNING: Terraform download failed: $_ — skipping." 'Yellow'
+    Write-Step "  WARNING: Terraform download failed: $_ - skipping." 'Yellow'
 }
 
 # ── 8. Write VERSIONS.md manifest ────────────────────────────────────────────
