@@ -1,20 +1,38 @@
+#Requires -Version 5.1
 <#
 .SYNOPSIS
     Builds the claude-setup-automation.zip release package.
 
 .DESCRIPTION
-    Downloads the two installers that are slow or flaky over the network
-    (Python 3.12 and VS Code) into the bundled/ directory, then zips the
-    entire project — scripts/, chatbot/, bundled/ — as
+    Downloads the latest version of each bundled installer into bundled/, then
+    zips the entire project — scripts/, chatbot/, bundled/ — as
     claude-setup-automation.zip in the project root.
 
-    Upload the resulting zip as the asset on the GitHub Release.  The stable
-    filename means NinjaOne's Deploy-DevEnvironment.ps1 always pulls the latest
-    without a URL change.
+    Bundled installers let Install-DevEnvironment.ps1 deploy with zero network
+    downloads.  Each URL is resolved dynamically so the zip always ships the
+    latest stable release at build time.
+
+    Bundled packages (in order of size, largest last):
+      VS Code        — always-latest redirect from Microsoft CDN
+      Git for Windows — latest release from GitHub API
+      AWS CLI v2     — always-latest MSI from Amazon CDN
+      Python 3.12    — latest 3.12.x from GitHub API / python.org fallback
+      GitHub CLI     — latest release from GitHub API
+      Terraform      — latest release from HashiCorp checkpoint API
+
+    NOT bundled (too large or handled well by Chocolatey at runtime):
+      Docker Desktop  — ~600 MB; Chocolatey handles it reliably
+      PowerShell 7    — ~100 MB; Chocolatey handles it reliably
+
+    A VERSIONS.md manifest is written to bundled/ so IT can see exactly what
+    versions are in the zip and when it was built.  Re-run this script before
+    each deployment wave to keep the bundle current.
 
 .NOTES
-    Run this from any PowerShell session — no elevation required.
+    Run from any PowerShell session — no elevation required.
     Requires internet access to download the bundled installers.
+    Upload the resulting zip as the asset on the v1.0 GitHub Release.
+    The stable filename means NinjaOne never needs a URL change.
 #>
 [CmdletBinding()]
 param()
@@ -34,43 +52,132 @@ function Write-Step {
 function Invoke-Fetch {
     param([string]$Url, [string]$Dest)
     Write-Step "  Downloading: $Url"
-    # Remove partial file from any previous failed attempt
     if (Test-Path $Dest) { Remove-Item $Dest -Force }
     [Net.ServicePointManager]::SecurityProtocol =
         [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13
     Invoke-WebRequest $Url -OutFile $Dest -UseBasicParsing -ErrorAction Stop
     $size = (Get-Item $Dest).Length / 1MB
-    Write-Step ("  Saved: {0}  ({1:F1} MB)" -f $Dest, $size) 'Green'
+    Write-Step ("  Saved: {0}  ({1:F1} MB)" -f (Split-Path $Dest -Leaf), $size) 'Green'
+    return $size
+}
+
+function Resolve-GitHubLatest {
+    param([string]$Repo, [string]$AssetPattern)
+    $r = Invoke-RestMethod "https://api.github.com/repos/$Repo/releases/latest"
+    $asset = $r.assets | Where-Object { $_.name -match $AssetPattern } | Select-Object -First 1
+    if (-not $asset) { throw "No asset matching '$AssetPattern' in $Repo latest release" }
+    return [pscustomobject]@{ Url = $asset.browser_download_url; Version = $r.tag_name; Name = $asset.name }
 }
 
 # ── 1. Create bundled directory ───────────────────────────────────────────────
 Write-Step 'Creating bundled/ directory…'
 New-Item -ItemType Directory -Path $BundledDir -Force | Out-Null
 
-# ── 2. Download Python 3.12 ───────────────────────────────────────────────────
-Write-Step 'Resolving Python 3.12 installer URL…'
+$manifest = [System.Collections.Generic.List[pscustomobject]]::new()
+$buildDate = Get-Date -Format 'yyyy-MM-dd HH:mm:ss UTC' -AsUTC
+
+# ── 2. VS Code (always-latest redirect, no version in URL) ────────────────────
+Write-Step 'Resolving VS Code installer…'
+$vscodeDest = Join-Path $BundledDir 'ME_Visual_Studio_Code.exe'
+$sz = Invoke-Fetch 'https://update.code.visualstudio.com/latest/win32-x64/stable' $vscodeDest
+# Extract version from the downloaded EXE description (best-effort)
+$vscodeVer = try {
+    (Get-Item $vscodeDest).VersionInfo.ProductVersion
+} catch { 'latest' }
+$manifest.Add([pscustomobject]@{ Package='VS Code'; Version=$vscodeVer; File='ME_Visual_Studio_Code.exe'; SizeMB=[math]::Round($sz,1) })
+
+# ── 3. Git for Windows ────────────────────────────────────────────────────────
+Write-Step 'Resolving Git for Windows installer…'
+try {
+    $git = Resolve-GitHubLatest 'git-for-windows/git' '-64-bit\.exe$'
+    Write-Step "  Git version: $($git.Version)  ($($git.Name))"
+    $sz = Invoke-Fetch $git.Url (Join-Path $BundledDir 'ME_Git_for_Windows.exe')
+    $manifest.Add([pscustomobject]@{ Package='Git for Windows'; Version=$git.Version; File='ME_Git_for_Windows.exe'; SizeMB=[math]::Round($sz,1) })
+} catch {
+    Write-Step "  WARNING: Git download failed: $_ — skipping." 'Yellow'
+}
+
+# ── 4. AWS CLI v2 (Amazon provides a stable always-latest URL) ────────────────
+Write-Step 'Downloading AWS CLI v2 (always-latest MSI)…'
+try {
+    $sz = Invoke-Fetch 'https://awscli.amazonaws.com/AWSCLIV2.msi' (Join-Path $BundledDir 'ME_AWS_CLI_v2.msi')
+    $manifest.Add([pscustomobject]@{ Package='AWS CLI v2'; Version='latest'; File='ME_AWS_CLI_v2.msi'; SizeMB=[math]::Round($sz,1) })
+} catch {
+    Write-Step "  WARNING: AWS CLI download failed: $_ — skipping." 'Yellow'
+}
+
+# ── 5. Python 3.12 ───────────────────────────────────────────────────────────
+Write-Step 'Resolving Python 3.12 installer…'
 $pythonUrl = $null
+$pythonVer = '3.12.x'
 try {
     $releases = Invoke-RestMethod 'https://api.github.com/repos/python/cpython/releases?per_page=30'
-    $rel      = $releases | Where-Object { $_.tag_name -match '^v3\.12\.' -and -not $_.prerelease } |
-                Select-Object -First 1
-    $asset    = $rel.assets | Where-Object { $_.name -match 'amd64\.exe$' } | Select-Object -First 1
-    if ($asset) { $pythonUrl = $asset.browser_download_url }
+    $rel = $releases | Where-Object { $_.tag_name -match '^v3\.12\.' -and -not $_.prerelease } |
+           Select-Object -First 1
+    $asset = $rel.assets | Where-Object { $_.name -match 'amd64\.exe$' } | Select-Object -First 1
+    if ($asset) { $pythonUrl = $asset.browser_download_url; $pythonVer = $rel.tag_name }
 } catch {
     Write-Step "  GitHub API lookup failed: $_ — using fallback URL." 'Yellow'
 }
 if (-not $pythonUrl) {
-    $pythonUrl = 'https://www.python.org/ftp/python/3.12.9/python-3.12.9-amd64.exe'
+    $pythonUrl = 'https://www.python.org/ftp/python/3.12.10/python-3.12.10-amd64.exe'
+    $pythonVer = '3.12.10-fallback'
 }
-Write-Step "  Python URL: $pythonUrl"
-Invoke-Fetch $pythonUrl (Join-Path $BundledDir 'ME_Python_3_12.exe')
+Write-Step "  Python version: $pythonVer"
+try {
+    $sz = Invoke-Fetch $pythonUrl (Join-Path $BundledDir 'ME_Python_3_12.exe')
+    $manifest.Add([pscustomobject]@{ Package='Python 3.12'; Version=$pythonVer; File='ME_Python_3_12.exe'; SizeMB=[math]::Round($sz,1) })
+} catch {
+    Write-Step "  WARNING: Python download failed: $_ — skipping." 'Yellow'
+}
 
-# ── 3. Download VS Code ───────────────────────────────────────────────────────
-Write-Step 'Downloading VS Code installer…'
-Invoke-Fetch 'https://update.code.visualstudio.com/latest/win32-x64/stable' `
-             (Join-Path $BundledDir 'ME_Visual_Studio_Code.exe')
+# ── 6. GitHub CLI ─────────────────────────────────────────────────────────────
+Write-Step 'Resolving GitHub CLI installer…'
+try {
+    $gh = Resolve-GitHubLatest 'cli/cli' 'windows_amd64\.msi$'
+    Write-Step "  GitHub CLI version: $($gh.Version)  ($($gh.Name))"
+    $sz = Invoke-Fetch $gh.Url (Join-Path $BundledDir 'ME_GitHub_CLI.msi')
+    $manifest.Add([pscustomobject]@{ Package='GitHub CLI'; Version=$gh.Version; File='ME_GitHub_CLI.msi'; SizeMB=[math]::Round($sz,1) })
+} catch {
+    Write-Step "  WARNING: GitHub CLI download failed: $_ — skipping." 'Yellow'
+}
 
-# ── 4. Build zip ──────────────────────────────────────────────────────────────
+# ── 7. Terraform ──────────────────────────────────────────────────────────────
+Write-Step 'Resolving Terraform installer…'
+try {
+    $cp  = Invoke-RestMethod 'https://checkpoint-api.hashicorp.com/v1/check/terraform'
+    $ver = $cp.current_version
+    $tfUrl = "https://releases.hashicorp.com/terraform/$ver/terraform_${ver}_windows_amd64.zip"
+    Write-Step "  Terraform version: $ver"
+    $sz = Invoke-Fetch $tfUrl (Join-Path $BundledDir 'ME_Terraform.zip')
+    $manifest.Add([pscustomobject]@{ Package='Terraform'; Version=$ver; File='ME_Terraform.zip'; SizeMB=[math]::Round($sz,1) })
+} catch {
+    Write-Step "  WARNING: Terraform download failed: $_ — skipping." 'Yellow'
+}
+
+# ── 8. Write VERSIONS.md manifest ────────────────────────────────────────────
+Write-Step 'Writing VERSIONS.md manifest…'
+$lines = @(
+    "# Bundled Installer Versions"
+    ""
+    "Built: $buildDate"
+    ""
+    "| Package | Version | File | Size |"
+    "|---------|---------|------|------|"
+)
+foreach ($m in $manifest) {
+    $lines += "| $($m.Package) | $($m.Version) | $($m.File) | $($m.SizeMB) MB |"
+}
+$lines += ""
+$lines += "**Not bundled** (installed at runtime by Chocolatey):"
+$lines += "- Docker Desktop"
+$lines += "- PowerShell 7"
+$lines += ""
+$lines += "Re-run Package-Release.ps1 before each deployment wave to refresh bundled versions."
+$lines | Set-Content (Join-Path $BundledDir 'VERSIONS.md') -Encoding UTF8
+Write-Step "  VERSIONS.md written." 'Green'
+
+# ── 9. Build zip ──────────────────────────────────────────────────────────────
 Write-Step 'Building claude-setup-automation.zip…'
 if (Test-Path $ZipPath) { Remove-Item $ZipPath -Force }
 
@@ -84,4 +191,8 @@ Compress-Archive -Path $include -DestinationPath $ZipPath -CompressionLevel Opti
 
 $zipSize = (Get-Item $ZipPath).Length / 1MB
 Write-Step ("Package ready: {0}  ({1:F1} MB)" -f $ZipPath, $zipSize) 'Green'
+Write-Step ''
+Write-Step 'Bundled versions:' 'White'
+$manifest | ForEach-Object { Write-Step "  $($_.Package.PadRight(18)) $($_.Version)" 'White' }
+Write-Step ''
 Write-Step 'Upload claude-setup-automation.zip as the asset on the GitHub Release.' 'Green'

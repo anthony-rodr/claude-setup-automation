@@ -630,8 +630,14 @@ function Install-ViaDirectDownload {
                         'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
                     )
                     # Guard against strict-mode crash: registry entries may lack DisplayName entirely.
+                    # Use try/catch inside the filter — PSObject.Properties check alone is not
+                    # sufficient in PS5.1 strict mode for all registry key types.
                     $entry = Get-ItemProperty $uninstallKeys -ErrorAction SilentlyContinue |
-                             Where-Object { $_.PSObject.Properties['DisplayName'] -and $_.DisplayName -like "*$($Pkg.Name)*" } |
+                             Where-Object {
+                                 $dn = $null
+                                 try { if ($_.PSObject.Properties['DisplayName']) { $dn = $_.DisplayName } } catch { }
+                                 $dn -and $dn -like "*$($Pkg.Name)*"
+                             } |
                              Select-Object -First 1
                     $usProp = if ($entry) { $entry.PSObject.Properties['UninstallString'] } else { $null }
                     if ($usProp -and $usProp.Value) {
@@ -686,6 +692,68 @@ function Install-ViaDirectDownload {
                                 }
                             }
                         }
+                    }
+                    # Clean per-user MSI product store — the ghost registration that survives
+                    # all the above lives in HKEY_USERS\{SID}\SOFTWARE\Microsoft\Installer\Products
+                    # (not HKLM).  Two passes: (1) HKU for currently-loaded hives (user logged in),
+                    # (2) reg load for offline profiles (script running before user logs in).
+                    $pkgBaseName = $Pkg.Name.Split(' ')[0]
+                    try {
+                        # Pass 1 — loaded hives
+                        if (-not (Get-PSDrive HKU -ErrorAction SilentlyContinue)) {
+                            New-PSDrive -Name HKU -PSProvider Registry -Root HKEY_USERS `
+                                -ErrorAction SilentlyContinue | Out-Null
+                        }
+                        Get-ChildItem 'HKU:\' -ErrorAction SilentlyContinue |
+                            Where-Object { $_.PSChildName -match '^S-1-5-21' } |
+                            ForEach-Object {
+                                $hkuMsi = "HKU:\$($_.PSChildName)\SOFTWARE\Microsoft\Installer\Products"
+                                if (Test-Path $hkuMsi) {
+                                    Get-ChildItem $hkuMsi -ErrorAction SilentlyContinue | ForEach-Object {
+                                        $pp  = Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue
+                                        $ppn = $null
+                                        try { if ($pp -and $pp.PSObject.Properties['ProductName']) { $ppn = $pp.ProductName } } catch { }
+                                        if ($ppn -and $ppn -like "*$pkgBaseName*") {
+                                            Remove-Item $_.PSPath -Recurse -Force -ErrorAction SilentlyContinue
+                                            Write-Log "  Removed per-user MSI product ($($_.PSChildName -replace 'HKU:\\','')): $ppn" 'DIAG'
+                                        }
+                                    }
+                                }
+                            }
+                        # Pass 2 — offline profiles (not yet loaded into HKU)
+                        $usersRoot = if (Test-Path 'C:\Users') { 'C:\Users' } else {
+                            Split-Path (Split-Path ([Environment]::GetFolderPath('UserProfile')))
+                        }
+                        Get-ChildItem $usersRoot -Directory -ErrorAction SilentlyContinue |
+                            Where-Object { $_.Name -notin @('Public','Default','Default User','All Users') } |
+                            ForEach-Object {
+                                $ntuser = Join-Path $_.FullName 'NTUSER.DAT'
+                                if (-not (Test-Path $ntuser)) { return }
+                                $tag      = $_.Name -replace '[^\w]','_'
+                                $hiveReg  = "HKLM\__TmpHive_$tag"
+                                $hiveKey  = "HKLM:\__TmpHive_$tag"
+                                $null = & reg load $hiveReg "`"$ntuser`"" 2>&1
+                                if ($LASTEXITCODE -ne 0) { return }   # locked = user logged in; covered by Pass 1
+                                try {
+                                    $offMsi = "$hiveKey\SOFTWARE\Microsoft\Installer\Products"
+                                    if (Test-Path $offMsi) {
+                                        Get-ChildItem $offMsi -ErrorAction SilentlyContinue | ForEach-Object {
+                                            $pp  = Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue
+                                            $ppn = $null
+                                            try { if ($pp -and $pp.PSObject.Properties['ProductName']) { $ppn = $pp.ProductName } } catch { }
+                                            if ($ppn -and $ppn -like "*$pkgBaseName*") {
+                                                Remove-Item $_.PSPath -Recurse -Force -ErrorAction SilentlyContinue
+                                                Write-Log "  Removed offline per-user MSI product ($($_.Name)): $ppn" 'DIAG'
+                                            }
+                                        }
+                                    }
+                                } finally {
+                                    [GC]::Collect(); [GC]::WaitForPendingFinalizers()
+                                    & reg unload $hiveReg 2>&1 | Out-Null
+                                }
+                            }
+                    } catch {
+                        Write-Log "  Per-user MSI cleanup warning: $_" 'DIAG'
                     }
                     $p = Start-Process $tmpFile -ArgumentList $Pkg.DArgs -Wait -PassThru -NoNewWindow
                     # If still 1638, the uninstall didn't fully clear it.
@@ -787,13 +855,32 @@ function Install-Package {
     }
 
     if ($RunningAsSystem) {
-        # SYSTEM context (NinjaOne): Chocolatey → Direct → winget (last resort)
+        # SYSTEM context (NinjaOne): Bundled → Chocolatey → Direct → winget (last resort)
         # winget has UWP/COM limitations as SYSTEM; Chocolatey is purpose-built for headless installs.
 
+        # Tier 0 — bundled installer (Package-Release.ps1 pre-downloads into bundled\ inside the zip)
+        # If the file is already in the zip, skip Choco entirely — no network and no Choco overhead.
+        $bundledExt  = switch ($Pkg.DType) {
+            'msi'         { '.msi' }
+            'zip-to-path' { '.zip' }
+            'msix'        { '.msix' }
+            default       { '.exe' }
+        }
+        $bundledPath = Join-Path $PSScriptRoot "..\bundled\ME_$($Pkg.Name -replace '[^\w]','_')$bundledExt"
+        if (-not $entry.Success -and (Test-Path $bundledPath)) {
+            Write-Log "  Tier 0 (bundled) — skipping Choco: $bundledPath" 'DIAG'
+            if (Install-ViaDirectDownload $Pkg) {
+                $entry.Method  = 'bundled'
+                $entry.Success = $true
+            }
+        }
+
         # Tier 1 — Chocolatey
-        if (Install-ViaChocolatey $Pkg) {
-            $entry.Method  = 'choco'
-            $entry.Success = $true
+        if (-not $entry.Success) {
+            if (Install-ViaChocolatey $Pkg) {
+                $entry.Method  = 'choco'
+                $entry.Success = $true
+            }
         }
 
         # Tier 2 — direct download
@@ -1199,21 +1286,34 @@ function Configure-ExistingProfiles {
         return
     }
 
+    # Launch all profile configs in parallel — ~74 s vs. 13 min sequential.
+    $jobMap = [System.Collections.Generic.List[object]]::new()
     foreach ($prof in $profiles) {
         $uname = Split-Path $prof -Leaf
-        Write-Log "Configuring existing profile: $uname ($prof)" 'INFO'
-        try {
-            # Run Configure script targeting this profile path.
-            # Extensions are installed via --user-data-dir so they land in the correct
-            # user directory even though this process runs as SYSTEM.
+        Write-Log "Starting parallel config for: $uname ($prof)" 'INFO'
+        $job = Start-Job -ScriptBlock {
+            param($script, $prof, $dir)
             & powershell.exe -NonInteractive -NoProfile -ExecutionPolicy Bypass `
-                -File $ConfigScript `
-                -UserProfile $prof `
-                -SetupDir $SetupDir `
-                2>&1 | ForEach-Object { Write-Log "  [$uname] $_" 'DIAG' }
+                -File $script -UserProfile $prof -SetupDir $dir 2>&1
+        } -ArgumentList $ConfigScript, $prof, $SetupDir
+        $jobMap.Add([pscustomobject]@{ Job = $job; Name = $uname })
+    }
+
+    # Collect output — overall cap: 15 minutes (same as the scheduled task limit).
+    $deadline = (Get-Date).AddMinutes(15)
+    foreach ($item in $jobMap) {
+        $remaining = [int][Math]::Max(1, ($deadline - (Get-Date)).TotalSeconds)
+        $item.Job | Wait-Job -Timeout $remaining | Out-Null
+        try {
+            Receive-Job $item.Job | ForEach-Object { Write-Log "  [$($item.Name)] $_" 'DIAG' }
         } catch {
-            Write-Log "  Failed to configure ${uname}: $_" 'WARN'
+            Write-Log "  Failed to collect output for $($item.Name): $_" 'WARN'
         }
+        if ($item.Job.State -ne 'Completed') {
+            Write-Log "  Config job timed out for $($item.Name) — leaving it running." 'WARN'
+            Stop-Job $item.Job -ErrorAction SilentlyContinue
+        }
+        Remove-Job $item.Job -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -1390,7 +1490,27 @@ if ($RunningAsSystem) {
     Repair-WingetSources
 }
 
-# ── Install packages ──────────────────────────────────────────────────────────
+# ── Bulk Choco install (SYSTEM fast path) ────────────────────────────────────
+# One choco call installs everything at once; the per-package loop below acts as
+# a verification and fallback pass for anything that failed or isn't in the config.
+if ($RunningAsSystem) {
+    $chocoConfig = Join-Path $PSScriptRoot 'packages.config'
+    if ((Test-Path $chocoConfig) -and (Ensure-Chocolatey)) {
+        Write-Log 'Running bulk Choco install from packages.config…' 'INFO'
+        $bulkOut = & choco install $chocoConfig --yes --no-progress 2>&1
+        $bulkRaw = ($bulkOut -join "`n")
+        Write-Log "  Bulk Choco exit $LASTEXITCODE" 'DIAG'
+        Write-Log "  $bulkRaw" 'DIAG'
+        if ($LASTEXITCODE -eq 0) {
+            Write-Log 'Bulk Choco install complete.' 'OK'
+        } else {
+            Write-Log 'Bulk Choco partial/failed — per-package fallback will cover remaining.' 'WARN'
+        }
+        Update-SessionPath
+    }
+}
+
+# ── Install packages (per-package fallback / verification) ───────────────────
 foreach ($pkg in $Packages) {
     Install-Package $pkg
     # Refresh PATH after each install so subsequent packages see newly added tools
@@ -1436,6 +1556,7 @@ if ($failCount -gt 0) {
 
 Write-Log "Full log: $LogPath" 'INFO'
 exit 0
+
 
 
 
