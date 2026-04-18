@@ -311,6 +311,27 @@ $Packages = @(
         DType  = 'zip-to-path'
         ZipDest = 'C:\Program Files\Terraform'
     }
+    @{
+        Name   = 'Keeper Commander'
+        Roles  = @('Dev', 'All')
+        Winget = $null
+        Choco  = $null
+        Direct = $null   # pip install — no download URL
+        DArgs  = $null
+        DType  = 'pip'
+        PipPkg = 'keepercommander'
+    }
+    @{
+        Name   = 'Claude Desktop'
+        Roles  = @('Dev', 'All')
+        Winget = $null
+        Choco  = 'claude'
+        Direct = {
+            'https://claude.ai/api/desktop/win32/x64/msix/latest/redirect'
+        }
+        DArgs  = $null
+        DType  = 'msix'
+    }
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -513,8 +534,12 @@ function Install-ViaChocolatey {
 
     for ($i = 1; $i -le $MaxRetries; $i++) {
         # choco upgrade installs if absent, upgrades if present — inherently idempotent
-        $out = & choco upgrade $id --yes --no-progress 2>&1
-        $raw = ($out -join "`n")
+        $lines = [System.Collections.Generic.List[string]]::new()
+        & choco upgrade $id --yes --no-progress 2>&1 | ForEach-Object {
+            $lines.Add([string]$_)
+            Write-Log "  [choco] $_" 'DIAG'
+        }
+        $raw = $lines -join "`n"
 
         # Only treat "already installed" as success when it refers to THIS package,
         # not a dependency — prevents false positives from vcredist/KB entries.
@@ -527,8 +552,9 @@ function Install-ViaChocolatey {
             $verifyExe = if ($Pkg.ContainsKey('VerifyExe')) { $Pkg['VerifyExe'] } else { $null }
             if ($verifyExe -and -not (Test-Path $verifyExe)) {
                 Write-Log "  VerifyExe missing after choco ($verifyExe) — forcing reinstall…" 'WARN'
-                $out2 = & choco install $id --yes --no-progress --force 2>&1
-                Write-Log "  choco --force output: $($out2 -join "`n")" 'DIAG'
+                & choco install $id --yes --no-progress --force 2>&1 | ForEach-Object {
+                    Write-Log "  [choco --force] $_" 'DIAG'
+                }
             }
             return $true
         }
@@ -572,6 +598,34 @@ function Install-ViaDirectDownload {
             Write-Log "  WSL direct install failed: $_" 'WARN'
             return $false
         }
+    }
+
+    # ── pip — Python package install (no download URL needed) ───────────────
+    if ($Pkg.DType -eq 'pip') {
+        $pipPkg = if ($Pkg.ContainsKey('PipPkg')) { $Pkg['PipPkg'] } else { $null }
+        if (-not $pipPkg) { Write-Log '  PipPkg not set — skipping.' 'WARN'; return $false }
+        $pythonCmd = Get-Command python -ErrorAction SilentlyContinue
+        $pythonExe = if ($pythonCmd) { $pythonCmd.Source } else { $null }
+        if (-not $pythonExe) {
+            $candidates = @(
+                'C:\Program Files\Python312\python.exe',
+                'C:\Python312\python.exe'
+            )
+            $pythonExe = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+        }
+        if (-not $pythonExe) {
+            Write-Log "  Python not found — cannot pip install $pipPkg." 'WARN'
+            return $false
+        }
+        Write-Log "  pip install $pipPkg ($pythonExe)…" 'DIAG'
+        & $pythonExe -m pip install $pipPkg --quiet 2>&1 | ForEach-Object {
+            Write-Log "  [pip] $_" 'DIAG'
+        }
+        $pipExit = $LASTEXITCODE
+        Write-Log "  pip exit $pipExit" 'DIAG'
+        if ($pipExit -eq 0) { Write-Log "  pip OK: $pipPkg" 'OK'; return $true }
+        Write-Log "  pip failed for $pipPkg." 'WARN'
+        return $false
     }
 
     if (-not $Pkg.Direct) { return $false }
@@ -789,7 +843,10 @@ function Install-ViaDirectDownload {
                 if ($p.ExitCode -notin @(0, 3010)) { throw "msiexec exit $($p.ExitCode)" }
             }
             'msix' {
-                Add-AppxPackage -Path $tmpFile -ErrorAction Stop
+                # Provision machine-wide so all users get the app on next logon.
+                # Add-AppxPackage (per-user) fails as SYSTEM; AppxProvisionedPackage works.
+                Add-AppxProvisionedPackage -Online -PackagePath $tmpFile `
+                    -SkipLicense -ErrorAction Stop | Out-Null
             }
             'zip-to-path' {
                 $dest = if ($Pkg.ZipDest) { $Pkg.ZipDest } else { 'C:\Program Files\ZipInstall' }
@@ -1497,11 +1554,12 @@ if ($RunningAsSystem) {
     $chocoConfig = Join-Path $PSScriptRoot 'packages.config'
     if ((Test-Path $chocoConfig) -and (Ensure-Chocolatey)) {
         Write-Log 'Running bulk Choco install from packages.config…' 'INFO'
-        $bulkOut = & choco install $chocoConfig --yes --no-progress 2>&1
-        $bulkRaw = ($bulkOut -join "`n")
-        Write-Log "  Bulk Choco exit $LASTEXITCODE" 'DIAG'
-        Write-Log "  $bulkRaw" 'DIAG'
-        if ($LASTEXITCODE -eq 0) {
+        & choco install $chocoConfig --yes --no-progress 2>&1 | ForEach-Object {
+            Write-Log "  [choco] $_" 'DIAG'
+        }
+        $bulkExit = $LASTEXITCODE
+        Write-Log "  Bulk Choco exit $bulkExit" 'DIAG'
+        if ($bulkExit -eq 0) {
             Write-Log 'Bulk Choco install complete.' 'OK'
         } else {
             Write-Log 'Bulk Choco partial/failed — per-package fallback will cover remaining.' 'WARN'

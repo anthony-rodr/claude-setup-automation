@@ -55,9 +55,35 @@ function Invoke-Fetch {
     if (Test-Path $Dest) { Remove-Item $Dest -Force }
     [Net.ServicePointManager]::SecurityProtocol =
         [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13
-    Invoke-WebRequest $Url -OutFile $Dest -UseBasicParsing -ErrorAction Stop
+
+    # Run download in a background job so we can poll file size for live progress
+    $job = Start-Job -ScriptBlock {
+        param($url, $dest)
+        [Net.ServicePointManager]::SecurityProtocol =
+            [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13
+        $ProgressPreference = 'SilentlyContinue'
+        Invoke-WebRequest $url -OutFile $dest -UseBasicParsing -ErrorAction Stop
+    } -ArgumentList $Url, $Dest
+
+    while ($job.State -eq 'Running') {
+        $label = if (Test-Path $Dest) { '{0:F1} MB downloaded' -f ((Get-Item $Dest).Length / 1MB) } `
+                 else { 'connecting...' }
+        Write-Host ("`r    $label" + (' ' * 10)) -NoNewline -ForegroundColor DarkCyan
+        Start-Sleep -Milliseconds 500
+    }
+    Write-Host ''
+
+    if ($job.State -ne 'Completed') {
+        $reason = $job.ChildJobs[0].JobStateInfo.Reason
+        Remove-Job $job -Force -ErrorAction SilentlyContinue
+        throw "Download failed: $reason"
+    }
+    Receive-Job $job -ErrorAction SilentlyContinue | Out-Null
+    Remove-Job $job -Force -ErrorAction SilentlyContinue
+
+    if (-not (Test-Path $Dest)) { throw "Download produced no file: $Url" }
     $size = (Get-Item $Dest).Length / 1MB
-    Write-Step ("  Saved: {0}  ({1:F1} MB)" -f (Split-Path $Dest -Leaf), $size) 'Green'
+    Write-Step ('  Saved: {0}  ({1:F1} MB)' -f (Split-Path $Dest -Leaf), $size) 'Green'
     return $size
 }
 
