@@ -227,7 +227,7 @@ $Packages = @(
         Name   = 'Python 3.12'
         Roles  = @('Dev', 'All')
         Winget = 'Python.Python.3.12'
-        Choco  = $null   # choco python312 exits 1603 when registry remnants exist; use direct/winget
+        Choco  = 'python312'   # fallback if bundled EXE fails (pre-cleanup in Install-ViaDirectDownload clears ghost state first)
         Direct = {
             try {
                 $releases = Invoke-RestMethod 'https://api.github.com/repos/python/cpython/releases?per_page=30'
@@ -677,6 +677,70 @@ function Install-ViaDirectDownload {
     try {
         switch ($Pkg.DType) {
             'exe' {
+                # For EXE installers with AltPaths (currently Python only): proactively
+                # clean any ghost MSI state before attempting install. Python's bootstrapper
+                # exits 0 even when its child msiexec fails due to ghost registrations —
+                # the reactive 1638 handler never fires because the parent never returns 1638.
+                # Pre-clean unconditionally: registry uninstall + bundled /uninstall + MSI DB scrub.
+                if ($Pkg.ContainsKey('AltPaths') -and $Pkg['AltPaths']) {
+                    Write-Log "  Pre-install: clearing any ghost MSI state for '$($Pkg.Name)'…" 'DIAG'
+                    $pkgBaseName = $Pkg.Name.Split(' ')[0]
+                    # 1) Registry-based uninstall of any detected version (version-agnostic)
+                    $uninstallKeys = @(
+                        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
+                        'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
+                    )
+                    Get-ItemProperty $uninstallKeys -ErrorAction SilentlyContinue | ForEach-Object {
+                        $dn = $null
+                        try { if ($_.PSObject.Properties['DisplayName']) { $dn = $_.DisplayName } } catch { }
+                        if ($dn -and $dn -like "*$pkgBaseName*") {
+                            $us = $null
+                            try { $us = $_.UninstallString } catch { }
+                            if ($us -and $us -match 'msiexec') {
+                                $code = [regex]::Match($us, '\{[^}]+\}').Value
+                                if ($code) {
+                                    Write-Log "  Pre-install: uninstalling $dn ($code)…" 'DIAG'
+                                    Start-Process msiexec.exe -ArgumentList "/x $code /quiet /norestart" -Wait -NoNewWindow | Out-Null
+                                }
+                            }
+                        }
+                    }
+                    # 2) Bundled EXE /uninstall — removes exact-version sub-MSIs atomically
+                    $pPre = Start-Process $tmpFile -ArgumentList '/quiet /uninstall' -Wait -PassThru -NoNewWindow
+                    Write-Log "  Pre-install /uninstall exited $($pPre.ExitCode)" 'DIAG'
+                    # 3) Scrub HKLM MSI product DB
+                    $msiProductsPath = 'HKLM:\SOFTWARE\Classes\Installer\Products'
+                    if (Test-Path $msiProductsPath) {
+                        Get-ChildItem $msiProductsPath -ErrorAction SilentlyContinue | ForEach-Object {
+                            $mp  = Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue
+                            $mpn = if ($mp -and $mp.PSObject.Properties['ProductName']) { $mp.PSObject.Properties['ProductName'].Value } else { $null }
+                            if ($mpn -and $mpn -like "*$pkgBaseName*") {
+                                Remove-Item $_.PSPath -Recurse -Force -ErrorAction SilentlyContinue
+                                Write-Log "  Pre-install: removed HKLM MSI product: $mpn" 'DIAG'
+                            }
+                        }
+                    }
+                    # 4) Scrub UserData MSI entries
+                    $msiUserDataRoot = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Installer\UserData'
+                    if (Test-Path $msiUserDataRoot) {
+                        Get-ChildItem $msiUserDataRoot -ErrorAction SilentlyContinue | ForEach-Object {
+                            $productsKey = Join-Path $_.PSPath 'Products'
+                            if (Test-Path $productsKey) {
+                                Get-ChildItem $productsKey -ErrorAction SilentlyContinue | ForEach-Object {
+                                    $ipKey = Join-Path $_.PSPath 'InstallProperties'
+                                    $ip = Get-ItemProperty $ipKey -ErrorAction SilentlyContinue
+                                    $ipn = if ($ip -and $ip.PSObject.Properties['DisplayName']) { $ip.PSObject.Properties['DisplayName'].Value } else { $null }
+                                    if ($ipn -and $ipn -like "*$pkgBaseName*") {
+                                        Remove-Item $_.PSPath -Recurse -Force -ErrorAction SilentlyContinue
+                                        Write-Log "  Pre-install: removed UserData MSI entry: $ipn" 'DIAG'
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Write-Log "  Pre-install cleanup complete." 'DIAG'
+                }
+
                 $p = Start-Process $tmpFile -ArgumentList $Pkg.DArgs -Wait -PassThru -NoNewWindow
                 # 1638 = another version already registered in Programs & Features.
                 # Uninstall the conflicting entry via the registry, then retry once.
@@ -1671,6 +1735,7 @@ if ($failCount -gt 0) {
 
 Write-Log "Full log: $LogPath" 'INFO'
 exit 0
+
 
 
 
