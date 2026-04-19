@@ -54,10 +54,12 @@ to download them from the internet before Tier 0 could run (~7 min wasted per de
 
 ## New packages added (session 4)
 - **Keeper Commander** (`DType = 'pip'`, `PipPkg = 'keepercommander'`) — pip install via machine Python 3.12
-  - **Did NOT install in Run 2** — likely because Python failed first; pip has no Python to run against
+  - Did NOT install in Run 2 because Python failed first (no Python = no pip)
+  - Fixed in session 5: Python now refreshes session PATH (root + Scripts\) after install
+  - **Not yet tested on target machines** — needs Run 3
 - **Claude Desktop** (`Choco = 'claude'`, `DType = 'msix'`) — Choco primary, MSIX direct fallback from Anthropic CDN
   - MSIX handler uses `Add-AppxProvisionedPackage` (machine-wide, all users) not `Add-AppxPackage` (per-user, fails as SYSTEM)
-  - **Not yet tested** — needs verification on next clean install run
+  - **Not yet tested** — needs Run 3
 
 ## Key design decisions
 - **Python has `Choco = $null`** — choco python312 exits 1638 when registry remnants exist
@@ -76,10 +78,16 @@ to download them from the internet before Tier 0 could run (~7 min wasted per de
 - Claude required reboot before working (expected). VS Code extensions confirmed present.
 
 ### Run 2 (2026-04-18, current scripts — packages.config fix applied)
-- ~98% successful — everything installed correctly except Python
-- Duration unknown — log files pending review
-- Python failure theory: Python Launcher may need to be installed before Python 3.12
-- **Await log files before drawing conclusions or making code changes**
+- 11/12 packages installed — only Python failed (cascaded to Keeper Commander)
+- Duration: ~13 min (verify-install timestamp: 14:53, bulk Choco started ~14:40)
+- **Root causes confirmed from logs (session 5):**
+  - Python EXE installer exits 0 in ~3 seconds — bootstrapper spawns child msiexec and exits; script moved on before Python files landed. `C:\Program Files\Python312\` never created.
+  - msiexec exit 1619 on bundled GitHub CLI and AWS CLI MSIs — unresolved `..` in path passed to msiexec.exe. Both fell through to Choco successfully (not a real failure).
+  - Keeper Commander: correctly skipped — Python not found at any AltPath or Scripts\ location
+- **Fixes applied and pushed (commits ea35ecc, 11620e9):**
+  - Python: poll AltPaths up to 90s after EXE exits; throw if python.exe never appears; refresh session PATH (root + Scripts\) on success
+  - msiexec: resolve path with GetFullPath() before calling msiexec
+  - Verify: added Keeper Commander + Claude Desktop checks, duration in summary
 
 ## Known issues / open items
 - **Python install fails (Run 2)** — root cause unknown pending log review.
@@ -96,10 +104,17 @@ to download them from the internet before Tier 0 could run (~7 min wasted per de
 - PSScriptAnalyzer warnings in Install-DevEnvironment.ps1 (pre-existing):
   Ensure-Winget, Ensure-Chocolatey, Configure-ExistingProfiles use unapproved verbs; unused $launcherSrc; $null comparison side
 
+## Dev machine state (as of session 5, 2026-04-18)
+- Keeper Commander installed on dev machine: `C:\Python314\Scripts\keeper.exe`
+- SSH key pair rotated (old key compromised in terminal — new key generated and added to GitHub)
+- Both keys stored in Keeper vault record "GitHub SSH Key (DEV)"
+- Private key file still on disk at `~\.ssh\id_ed25519` — DO NOT DELETE until ssh-agent setup confirmed
+- **Keeper login issue**: Zscaler SSL inspection blocks `keeper login` — had to disable Zscaler temporarily. Fix needed: add Zscaler root CA to Python certifi bundle (next session)
+
 ## Next steps (as of 2026-04-18)
-1. Rollback test machine — copy all logs to C:\projects\ for review
-2. Analyze Run 2 install log to confirm Python failure root cause
-3. Fix Python install and rollback based on log findings
-4. Rebuild zip: run Package-Release.ps1 (bundled files already present, just rezipping scripts)
-5. Upload: `gh release upload v1.0 claude-setup-automation.zip --clobber`
-6. Run fresh install — verify Python, Keeper Commander, Claude Desktop
+1. Run `.\scripts\Package-Release.ps1` on dev machine to rebuild zip
+2. `gh release upload v1.0 claude-setup-automation.zip --clobber`
+3. Run 3 on test machine — verify Python (~60s install), Keeper Commander, Claude Desktop
+4. Fix Keeper login Zscaler issue: export Zscaler root CA → append to certifi bundle
+5. Set up Keeper SSH agent → verify git push works → delete `~\.ssh\id_ed25519` from disk
+6. Fix Python rollback: use `ME_Python_3_12.exe /quiet /uninstall` instead of winget
