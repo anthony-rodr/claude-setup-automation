@@ -48,8 +48,13 @@ try {
     $skipDownload = $false
     if (Test-Path $ExtractDir) {
         try {
-            $remoteVersions = Invoke-WebRequest -Uri $VersionsUrl -UseBasicParsing -ErrorAction Stop |
-                              Select-Object -ExpandProperty Content
+            $resp = Invoke-WebRequest -Uri $VersionsUrl -UseBasicParsing -ErrorAction Stop
+            # Content may be [byte[]] on older PS5 builds — decode explicitly
+            $remoteVersions = if ($resp.Content -is [byte[]]) {
+                [System.Text.Encoding]::UTF8.GetString($resp.Content)
+            } else {
+                [string]$resp.Content
+            }
             if (Test-Path $VersionsOnDisk) {
                 $localVersions = Get-Content $VersionsOnDisk -Raw
                 if ($remoteVersions.Trim() -eq $localVersions.Trim()) {

@@ -652,10 +652,26 @@ function Install-ViaDirectDownload {
         }
 
         Write-Log "  pip install $pipPkg ($pythonExe)…" 'DIAG'
-        & $pythonExe -m pip install $pipPkg --quiet 2>&1 | ForEach-Object {
-            Write-Log "  [pip] $_" 'DIAG'
+        # Use Start-Process + redirect-to-files + WaitForExit(timeout) so a hung
+        # pip (e.g. Zscaler blocking pypi.org) does not freeze the whole script.
+        $pipStdout = Join-Path $env:TEMP "pip_out_$PID.txt"
+        $pipStderr = Join-Path $env:TEMP "pip_err_$PID.txt"
+        $pipProc = Start-Process $pythonExe `
+            -ArgumentList @('-m', 'pip', 'install', $pipPkg, '--timeout', '60') `
+            -RedirectStandardOutput $pipStdout `
+            -RedirectStandardError  $pipStderr `
+            -PassThru -NoNewWindow
+        $pipDone = $pipProc.WaitForExit(180000)   # 3-minute wall-clock timeout
+        if (-not $pipDone) {
+            try { $pipProc.Kill() } catch {}
+            Write-Log '  pip killed after 180 s — network hang suspected.' 'WARN'
+            Remove-Item $pipStdout,$pipStderr -Force -ErrorAction SilentlyContinue
+            return $false
         }
-        $pipExit = $LASTEXITCODE
+        $pipExit = $pipProc.ExitCode
+        Get-Content $pipStdout -ErrorAction SilentlyContinue | ForEach-Object { Write-Log "  [pip] $_" 'DIAG' }
+        Get-Content $pipStderr -ErrorAction SilentlyContinue | ForEach-Object { Write-Log "  [pip:err] $_" 'DIAG' }
+        Remove-Item $pipStdout,$pipStderr -Force -ErrorAction SilentlyContinue
         Write-Log "  pip exit $pipExit" 'DIAG'
         if ($pipExit -eq 0) { Write-Log "  pip OK: $pipPkg" 'OK'; return $true }
         Write-Log "  pip failed for $pipPkg." 'WARN'
