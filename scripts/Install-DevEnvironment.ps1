@@ -1831,6 +1831,15 @@ Write-Log "Duration           : $dur" 'INFO'
 Write-Log "Packages attempted : $($Manifest.Packages.Count)" 'INFO'
 Write-Log "Failures           : $failCount" $(if ($failCount -gt 0) { 'FAIL' } else { 'OK' })
 
+# ── Notify signed-on users that installation is complete ─────────────────────
+try {
+    $notifyMsg = 'IT Update: Developer tool installation is complete. If a service is not working as expected, please restart your computer.'
+    & "$env:SystemRoot\System32\msg.exe" * /TIME:120 $notifyMsg 2>&1 | Out-Null
+    Write-Log 'Completion notification sent to signed-on users.' 'OK'
+} catch {
+    Write-Log "Could not send completion notification: $_" 'WARN'
+}
+
 if ($failCount -gt 0) {
     Write-Log '' 'INFO'
     Write-Log 'Failed items:' 'FAIL'

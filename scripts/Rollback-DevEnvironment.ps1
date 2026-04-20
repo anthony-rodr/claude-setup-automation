@@ -41,7 +41,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Continue'
 
-$ScriptVersion = 'd3e9bb7'  # Stamped by Package-Release.ps1 — copy stamped script to NinjaOne
+$ScriptVersion = 'GIT_COMMIT_HASH'  # Stamped by Package-Release.ps1 — copy stamped script to NinjaOne
 
 $SetupDir = Split-Path $ManifestPath -Parent
 $TaskName = 'MasterElectronics-ConfigureUserEnvironment'

@@ -17,7 +17,7 @@
     Tested:  Windows 11
 #>
 
-$ScriptVersion = 'd3e9bb7'  # Stamped by Package-Release.ps1 — copy stamped script to NinjaOne
+$ScriptVersion = 'GIT_COMMIT_HASH'  # Stamped by Package-Release.ps1 — copy stamped script to NinjaOne
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 # Stable URL — always points to the latest release asset named claude-setup-automation.zip.
