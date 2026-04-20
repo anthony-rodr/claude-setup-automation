@@ -327,15 +327,16 @@ $Packages = @(
     }
     #>
     @{
-        Name   = 'Claude Desktop'
-        Roles  = @('Dev', 'All')
-        Winget = $null
-        Choco  = $null   # choco installs as per-user MSIX for SYSTEM, not machine-wide provisioned; use direct MSIX tier
-        Direct = {
+        Name       = 'Claude Desktop'
+        Roles      = @('Dev', 'All')
+        Winget     = $null
+        Choco      = $null   # choco installs as per-user MSIX for SYSTEM, not machine-wide provisioned; use direct MSIX tier
+        Direct     = {
             'https://claude.ai/api/desktop/win32/x64/msix/latest/redirect'
         }
-        DArgs  = $null
-        DType  = 'msix'
+        DArgs      = $null
+        DType      = 'msix'
+        VerifyAppx = '*Claude*'   # skip if already provisioned machine-wide
     }
 )
 
@@ -1083,6 +1084,22 @@ function Install-Package {
         $Manifest.Packages.Add($entry)
         Save-Manifest
         return
+    }
+
+    # Pre-check for MSIX/AppX packages: skip if already provisioned machine-wide.
+    $preCheckAppx = if ($Pkg.ContainsKey('VerifyAppx')) { $Pkg['VerifyAppx'] } else { $null }
+    if ($preCheckAppx) {
+        $appxPkg = Get-AppxProvisionedPackage -Online -ErrorAction SilentlyContinue |
+                   Where-Object { $_.DisplayName -like $preCheckAppx } |
+                   Select-Object -First 1
+        if ($appxPkg) {
+            Write-Log "  $($Pkg.Name) already provisioned ($($appxPkg.Version)) — skipping." 'OK'
+            $entry.Method  = 'pre-existing'
+            $entry.Success = $true
+            $Manifest.Packages.Add($entry)
+            Save-Manifest
+            return
+        }
     }
 
     if ($RunningAsSystem) {
