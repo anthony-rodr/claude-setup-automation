@@ -50,7 +50,12 @@ function Write-Step {
 }
 
 function Invoke-Fetch {
-    param([string]$Url, [string]$Dest)
+    param([string]$Url, [string]$Dest, [switch]$Force)
+    if ((Test-Path $Dest) -and -not $Force) {
+        $size = (Get-Item $Dest).Length / 1MB
+        Write-Step ('  Already present — skipping: {0}  ({1:F1} MB)' -f (Split-Path $Dest -Leaf), $size) 'DarkGreen'
+        return $size
+    }
     Write-Step "  Downloading: $Url"
     if (Test-Path $Dest) { Remove-Item $Dest -Force }
     [Net.ServicePointManager]::SecurityProtocol =
