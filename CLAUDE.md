@@ -119,7 +119,7 @@ to download them from the internet before Tier 0 could run (~7 min wasted per de
 - Run 3 (2026-04-18): 17m 56s — 11/14, Python same failure, Claude Desktop installed per-user not provisioned
 - Run 4 (2026-04-20): Python 3.12 INSTALLED (pre-cleanup fixed ghost MSI), pip hung on Keeper (Zscaler blocked pypi.org)
 - Run 5 (2026-04-20): pip still failed — CA cert injection works but Zscaler blocks pypi.org at network level; Keeper Commander disabled
-- Run 6 (2026-04-20): SUCCESS — all packages installed, VS Code extensions confirmed, Claude installed; missing Claude public desktop shortcut
+- Run 6 (2026-04-20): 24m 43s — 12/12, 0 failures; VS Code extensions confirmed, Claude installed; missing Claude public desktop shortcut (fixed)
 
 ## Known issues / open items
 - **Python rollback**: winget not found as SYSTEM (stripped PATH in NinjaOne); also `reg` not found — need full paths
