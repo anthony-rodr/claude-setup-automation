@@ -1,4 +1,4 @@
-#Requires -RunAsAdministrator
+﻿#Requires -RunAsAdministrator
 <#
 .SYNOPSIS
     Bootstrap script for NinjaOne deployment of the Master Electronics developer environment.
