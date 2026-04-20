@@ -104,17 +104,33 @@ to download them from the internet before Tier 0 could run (~7 min wasted per de
 - PSScriptAnalyzer warnings in Install-DevEnvironment.ps1 (pre-existing):
   Ensure-Winget, Ensure-Chocolatey, Configure-ExistingProfiles use unapproved verbs; unused $launcherSrc; $null comparison side
 
-## Dev machine state (as of session 5, 2026-04-18)
+## Dev machine state (as of session 6, 2026-04-20)
 - Keeper Commander installed on dev machine: `C:\Python314\Scripts\keeper.exe`
-- SSH key pair rotated (old key compromised in terminal — new key generated and added to GitHub)
-- Both keys stored in Keeper vault record "GitHub SSH Key (DEV)"
-- Private key file still on disk at `~\.ssh\id_ed25519` — DO NOT DELETE until ssh-agent setup confirmed
-- **Keeper login issue**: Zscaler SSL inspection blocks `keeper login` — had to disable Zscaler temporarily. Fix needed: add Zscaler root CA to Python certifi bundle (next session)
+- SSH key pair: Windows ssh-agent service set to Automatic; PS profile loads key at login
+- PS profile: `~\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1`
+- Keeper login works (Zscaler CA appended to `C:\Python314\Lib\site-packages\certifi\cacert.pem`)
+- Keeper uses SSO — non-interactive access requires KSM (not licensed yet)
+- KSM licensing: needs to be requested from Keeper admin — blocker for full secrets automation
 
-## Next steps (as of 2026-04-18)
-1. Run `.\scripts\Package-Release.ps1` on dev machine to rebuild zip
-2. `gh release upload v1.0 claude-setup-automation.zip --clobber`
-3. Run 3 on test machine — verify Python (~60s install), Keeper Commander, Claude Desktop
-4. Fix Keeper login Zscaler issue: export Zscaler root CA → append to certifi bundle
-5. Set up Keeper SSH agent → verify git push works → delete `~\.ssh\id_ed25519` from disk
-6. Fix Python rollback: use `ME_Python_3_12.exe /quiet /uninstall` instead of winget
+## Run history
+- Run 1 (2026-04-18): 19m 22s — 12/12, bulk Choco was slow (bundled pkgs in packages.config)
+- Run 2 (2026-04-18): ~13m — 11/12, Python failed (bootstrapper exits fast, child msiexec never completes)
+- Run 3 (2026-04-18): 17m 56s — 11/14, Python same failure, Claude Desktop installed per-user not provisioned
+- Run 4 (2026-04-20): Python 3.12 INSTALLED (pre-cleanup fixed ghost MSI), pip hung on Keeper (Zscaler blocked pypi.org)
+- Run 5 (pending): CA cert injection fix applied — should unblock pip/Keeper Commander
+
+## Known issues / open items
+- **Python rollback**: winget not found as SYSTEM (stripped PATH in NinjaOne); also `reg` not found — need full paths
+- **reg.exe / powershell.exe**: rollback script uses bare `reg` which fails in stripped-PATH SYSTEM sessions — fix: use `$env:SystemRoot\System32\reg.exe` full path
+- **Rollback leaves Python files**: no uninstall string in registry for machine-wide Python; winget fallback fails as SYSTEM
+- **Claude Desktop**: untested in Run 4 (script stopped at pip) — verify in Run 5
+- **KSM licensing**: needed for non-interactive Keeper access / broader secrets automation
+- **fix-encoding.ps1**: appends extra blank lines to unchanged PS1 files each run — minor nuisance
+- WSL2 cannot be removed without a reboot
+- libcurl DLL conflict (from Docker/AWS CLI) breaks git HTTPS — always use SSH for pushes
+
+## Next steps (as of 2026-04-20)
+1. Run 5 on test machine — verify Keeper Commander pip install (CA cert fix), Claude Desktop MSIX
+2. Fix rollback: use full paths for `reg.exe`, fix Python uninstall (use bundled EXE /uninstall)
+3. Request KSM licensing from Keeper admin
+4. Fix fix-encoding.ps1 trailing blank lines issue
