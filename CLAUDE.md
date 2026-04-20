@@ -53,10 +53,11 @@ Tier 0 (local) first, Choco only if that fails. Putting them in packages.config 
 to download them from the internet before Tier 0 could run (~7 min wasted per deployment).
 
 ## New packages added (session 4)
-- **Keeper Commander** (`DType = 'pip'`, `PipPkg = 'keepercommander'`) — pip install via machine Python 3.12
-  - Did NOT install in Run 2 because Python failed first (no Python = no pip)
-  - Fixed in session 5: Python now refreshes session PATH (root + Scripts\) after install
-  - **Not yet tested on target machines** — needs Run 3
+- **Keeper Commander** — **disabled 2026-04-20** (block-commented in Install-DevEnvironment.ps1)
+  - pip install fails consistently on NinjaOne SYSTEM sessions: Zscaler SSL inspection
+    blocks pypi.org even after CA cert injection into certifi bundle (Runs 4, 5, 6)
+  - Do NOT re-enable until KSM is licensed and a non-pip delivery method is available
+    (e.g. a pre-built wheel bundled in the zip, or a Choco/winget package)
 - **Claude Desktop** (`Choco = 'claude'`, `DType = 'msix'`) — Choco primary, MSIX direct fallback from Anthropic CDN
   - MSIX handler uses `Add-AppxProvisionedPackage` (machine-wide, all users) not `Add-AppxPackage` (per-user, fails as SYSTEM)
   - **Not yet tested** — needs Run 3
@@ -117,7 +118,7 @@ to download them from the internet before Tier 0 could run (~7 min wasted per de
 - Run 2 (2026-04-18): ~13m — 11/12, Python failed (bootstrapper exits fast, child msiexec never completes)
 - Run 3 (2026-04-18): 17m 56s — 11/14, Python same failure, Claude Desktop installed per-user not provisioned
 - Run 4 (2026-04-20): Python 3.12 INSTALLED (pre-cleanup fixed ghost MSI), pip hung on Keeper (Zscaler blocked pypi.org)
-- Run 5 (pending): CA cert injection fix applied — should unblock pip/Keeper Commander
+- Run 5 (2026-04-20): pip still failed — CA cert injection works but Zscaler blocks pypi.org at network level; Keeper Commander disabled
 
 ## Known issues / open items
 - **Python rollback**: winget not found as SYSTEM (stripped PATH in NinjaOne); also `reg` not found — need full paths
@@ -135,8 +136,8 @@ the full zip. If versions match what's on disk, the 300+ MB download and extract
 Upload command going forward: `gh release upload v1.0 claude-setup-automation.zip VERSIONS.md --clobber`
 
 ## Next steps (as of 2026-04-20)
-1. Run 5 on test machine — verify Keeper Commander pip install (CA cert fix), Claude Desktop MSIX
+1. Run 6 on test machine — verify Claude Desktop MSIX installs machine-wide (Keeper Commander now disabled)
 2. Fix rollback: use full paths for `reg.exe` and `powershell.exe` (stripped PATH in NinjaOne SYSTEM sessions)
 3. Fix Python rollback: use bundled `ME_Python_3_12.exe /quiet /uninstall` instead of winget
-4. Request KSM licensing from Keeper admin
+4. Request KSM licensing from Keeper admin — needed before Keeper Commander can be re-enabled
 5. Fix fix-encoding.ps1 trailing blank lines issue

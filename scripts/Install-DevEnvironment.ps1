@@ -311,6 +311,10 @@ $Packages = @(
         DType  = 'zip-to-path'
         ZipDest = 'C:\Program Files\Terraform'
     }
+    <#  Keeper Commander — disabled 2026-04-20
+        pip install keepercommander fails consistently on NinjaOne SYSTEM sessions:
+        Zscaler SSL inspection blocks pypi.org even after CA cert injection into
+        certifi. Needs KSM licensing + a non-pip delivery method before re-enabling.
     @{
         Name   = 'Keeper Commander'
         Roles  = @('Dev', 'All')
@@ -321,6 +325,7 @@ $Packages = @(
         DType  = 'pip'
         PipPkg = 'keepercommander'
     }
+    #>
     @{
         Name   = 'Claude Desktop'
         Roles  = @('Dev', 'All')
