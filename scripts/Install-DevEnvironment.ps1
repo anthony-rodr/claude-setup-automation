@@ -620,6 +620,37 @@ function Install-ViaDirectDownload {
             Write-Log "  Python not found — cannot pip install $pipPkg." 'WARN'
             return $false
         }
+        # Append corporate CA certs (e.g. Zscaler) to certifi bundle so pip can
+        # reach pypi.org through SSL-inspecting proxies. Exports every non-standard
+        # root from the Windows trusted root store and appends any that are missing.
+        try {
+            $certifiBundle = & $pythonExe -c 'import certifi; print(certifi.where())' 2>&1
+            if ($certifiBundle -and (Test-Path $certifiBundle)) {
+                $bundleContent = Get-Content $certifiBundle -Raw
+                $roots = & "$env:SystemRoot\System32\certutil.exe" -store Root 2>&1
+                $thumbprints = [regex]::Matches($roots, 'Cert Hash\(sha1\):\s+([0-9a-f]+)') |
+                               ForEach-Object { $_.Groups[1].Value }
+                foreach ($thumb in $thumbprints) {
+                    $cerFile = Join-Path $env:TEMP "$thumb.cer"
+                    $pemFile = Join-Path $env:TEMP "$thumb.pem"
+                    $null = & "$env:SystemRoot\System32\certutil.exe" -store Root $thumb $cerFile 2>&1
+                    if (-not (Test-Path $cerFile)) { continue }
+                    $null = & "$env:SystemRoot\System32\certutil.exe" -encode $cerFile $pemFile 2>&1
+                    if (-not (Test-Path $pemFile)) { continue }
+                    $pemContent = Get-Content $pemFile -Raw
+                    # Extract just the base64 block to check for duplicates
+                    $b64 = [regex]::Match($pemContent, '-----BEGIN CERTIFICATE-----(.+?)-----END CERTIFICATE-----', [System.Text.RegularExpressions.RegexOptions]::Singleline).Groups[1].Value -replace '\s',''
+                    if ($b64 -and $bundleContent -notlike "*$b64*") {
+                        Add-Content $certifiBundle "`r`n$pemContent"
+                        Write-Log "  Appended CA cert ($thumb) to certifi bundle" 'DIAG'
+                    }
+                    Remove-Item $cerFile,$pemFile -Force -ErrorAction SilentlyContinue
+                }
+            }
+        } catch {
+            Write-Log "  CA cert injection warning: $_ — pip may fail behind SSL proxy" 'WARN'
+        }
+
         Write-Log "  pip install $pipPkg ($pythonExe)…" 'DIAG'
         & $pythonExe -m pip install $pipPkg --quiet 2>&1 | ForEach-Object {
             Write-Log "  [pip] $_" 'DIAG'
@@ -1765,6 +1796,7 @@ if ($failCount -gt 0) {
 
 Write-Log "Full log: $LogPath" 'INFO'
 exit 0
+
 
 
 
