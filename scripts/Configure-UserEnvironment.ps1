@@ -382,6 +382,31 @@ function New-AppShortcuts {
             Write-Log "  Failed to create $($app.Name) shortcut: $_" 'WARN'
         }
     }
+
+    # Claude Desktop — public desktop shortcut (provisioned MSIX, machine-wide).
+    # Written to Public desktop so all users see it; skipped if already present.
+    $publicClaudeLnk = 'C:\Users\Public\Desktop\Claude.lnk'
+    if (-not (Test-Path $publicClaudeLnk)) {
+        try {
+            $claudePkg = Get-AppxPackage -AllUsers -Name '*Claude*' -ErrorAction SilentlyContinue |
+                         Select-Object -First 1
+            $claudeExe = if ($claudePkg) { Join-Path $claudePkg.InstallLocation 'Claude.exe' } else { $null }
+            if ($claudeExe -and (Test-Path $claudeExe)) {
+                $lnk                  = $wsh.CreateShortcut($publicClaudeLnk)
+                $lnk.TargetPath       = $claudeExe
+                $lnk.WorkingDirectory = $claudePkg.InstallLocation
+                $lnk.Description      = 'Claude'
+                $lnk.Save()
+                Write-Log '  Public desktop shortcut created: Claude' 'OK'
+            } else {
+                Write-Log '  Claude Desktop AppX package not found — public shortcut skipped.' 'WARN'
+            }
+        } catch {
+            Write-Log "  Failed to create Claude public desktop shortcut: $_" 'WARN'
+        }
+    } else {
+        Write-Log '  Claude public desktop shortcut already exists — skipping.' 'DIAG'
+    }
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
