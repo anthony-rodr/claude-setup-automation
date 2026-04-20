@@ -57,11 +57,13 @@ try {
             }
             if (Test-Path $VersionsOnDisk) {
                 $localVersions = Get-Content $VersionsOnDisk -Raw
-                if ($remoteVersions.Trim() -eq $localVersions.Trim()) {
+                $installPresent = Get-ChildItem -Path $ExtractDir -Filter 'Install-DevEnvironment.ps1' -Recurse -ErrorAction SilentlyContinue |
+                                  Select-Object -First 1
+                if ($installPresent -and $remoteVersions.Trim() -eq $localVersions.Trim()) {
                     Write-Step "Bundle is current (VERSIONS.md matches) — skipping download."
                     $skipDownload = $true
                 } else {
-                    Write-Step "New version detected — re-downloading bundle."
+                    Write-Step "New version detected or extracted package incomplete — re-downloading bundle."
                 }
             }
         } catch {
