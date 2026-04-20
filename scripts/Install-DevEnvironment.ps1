@@ -173,22 +173,24 @@ function Save-Manifest {
 # ─────────────────────────────────────────────────────────────────────────────
 $Packages = @(
     @{
-        Name   = 'Git for Windows'
-        Roles  = @('Core', 'Dev', 'CloudOps', 'All')
-        Winget = 'Git.Git'
-        Choco  = 'git'
-        Direct = {
+        Name      = 'Git for Windows'
+        Roles     = @('Core', 'Dev', 'CloudOps', 'All')
+        Winget    = 'Git.Git'
+        Choco     = 'git'
+        VerifyCmd = 'git'
+        Direct    = {
             $r = Invoke-RestMethod 'https://api.github.com/repos/git-for-windows/git/releases/latest'
             ($r.assets | Where-Object { $_.name -match '-64-bit\.exe$' }).browser_download_url
         }
-        DArgs  = '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /COMPONENTS="icons,ext\reg\shellhere,assoc,assoc_sh"'
-        DType  = 'exe'
+        DArgs     = '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /COMPONENTS="icons,ext\reg\shellhere,assoc,assoc_sh"'
+        DType     = 'exe'
     }
     @{
         Name      = 'Visual Studio Code'
         Roles     = @('Core', 'Dev', 'CloudOps', 'All')
         Winget    = 'Microsoft.VisualStudioCode'
         Choco     = 'vscode'
+        VerifyCmd = 'code'
         VerifyExe = 'C:\Program Files\Microsoft VS Code\Code.exe'
         Direct    = {
             # The /latest redirect resolves to the current stable installer
@@ -198,30 +200,32 @@ $Packages = @(
         DType     = 'exe'
     }
     @{
-        Name   = 'PowerShell 7'
-        Roles  = @('Core', 'Dev', 'CloudOps', 'All')
-        Winget = 'Microsoft.PowerShell'
-        Choco  = 'powershell-core'
-        Direct = {
+        Name      = 'PowerShell 7'
+        Roles     = @('Core', 'Dev', 'CloudOps', 'All')
+        Winget    = 'Microsoft.PowerShell'
+        Choco     = 'powershell-core'
+        VerifyCmd = 'pwsh'
+        Direct    = {
             $r = Invoke-RestMethod 'https://api.github.com/repos/PowerShell/PowerShell/releases/latest'
             ($r.assets | Where-Object { $_.name -match 'win-x64\.msi$' -and $_.name -notmatch 'preview' }).browser_download_url
         }
-        DArgs  = '/quiet /norestart ADD_EXPLORER_CONTEXT_MENU_OPENPOWERSHELL=1 REGISTER_MANIFEST=1 USE_MU=1 ENABLE_MU=1'
-        DType  = 'msi'
+        DArgs     = '/quiet /norestart ADD_EXPLORER_CONTEXT_MENU_OPENPOWERSHELL=1 REGISTER_MANIFEST=1 USE_MU=1 ENABLE_MU=1'
+        DType     = 'msi'
     }
     @{
-        Name    = 'nvm-windows'
-        Roles   = @('Dev', 'All')
-        Winget  = $null     # winget installs nvm per-user (AppData) — must be machine-wide for all users
-        Choco   = $null     # choco nvm silently no-ops as SYSTEM
+        Name      = 'nvm-windows'
+        Roles     = @('Dev', 'All')
+        Winget    = $null     # winget installs nvm per-user (AppData) — must be machine-wide for all users
+        Choco     = $null     # choco nvm silently no-ops as SYSTEM
+        VerifyCmd = 'nvm'     # skip if already machine-wide; zip-to-path would wipe existing node versions
         # nvm-noinstall.zip extracts nvm.exe to ZipDest — machine-wide, no installer UI.
         # We write settings.txt and set machine env vars in Install-ClaudeCode.
-        Direct  = {
+        Direct    = {
             $r = Invoke-RestMethod 'https://api.github.com/repos/coreybutler/nvm-windows/releases/latest'
             ($r.assets | Where-Object { $_.name -eq 'nvm-noinstall.zip' }).browser_download_url
         }
-        DType   = 'zip-to-path'
-        ZipDest = 'C:\ProgramData\nvm'
+        DType     = 'zip-to-path'
+        ZipDest   = 'C:\ProgramData\nvm'
     }
     @{
         Name   = 'Python 3.12'
@@ -252,16 +256,17 @@ $Packages = @(
         )
     }
     @{
-        Name   = 'GitHub CLI'
-        Roles  = @('Dev', 'All')
-        Winget = 'GitHub.cli'
-        Choco  = 'gh'
-        Direct = {
+        Name      = 'GitHub CLI'
+        Roles     = @('Dev', 'All')
+        Winget    = 'GitHub.cli'
+        Choco     = 'gh'
+        VerifyCmd = 'gh'
+        Direct    = {
             $r = Invoke-RestMethod 'https://api.github.com/repos/cli/cli/releases/latest'
             ($r.assets | Where-Object { $_.name -match 'windows_amd64\.msi$' }).browser_download_url
         }
-        DArgs  = '/quiet /norestart'
-        DType  = 'msi'
+        DArgs     = '/quiet /norestart'
+        DType     = 'msi'
     }
     @{
         # WSL2 must be installed before Docker Desktop (Docker requires it for the wsl-2 backend).
@@ -276,40 +281,43 @@ $Packages = @(
         DType  = 'wsl-install'
     }
     @{
-        Name   = 'Docker Desktop'
-        Roles  = @('Dev', 'All')
-        Winget = 'Docker.DockerDesktop'
-        Choco  = 'docker-desktop'
-        Direct = {
+        Name      = 'Docker Desktop'
+        Roles     = @('Dev', 'All')
+        Winget    = 'Docker.DockerDesktop'
+        Choco     = 'docker-desktop'
+        VerifyCmd = 'docker'   # docker CLI present means Desktop is installed; reinstall resets settings
+        Direct    = {
             'https://desktop.docker.com/win/main/amd64/Docker%20Desktop%20Installer.exe'
         }
-        DArgs  = 'install --quiet --accept-license --backend=wsl-2'
-        DType  = 'exe-args'
+        DArgs     = 'install --quiet --accept-license --backend=wsl-2'
+        DType     = 'exe-args'
     }
     @{
-        Name   = 'AWS CLI v2'
-        Roles  = @('CloudOps', 'All')
-        Winget = 'Amazon.AWSCLI'
-        Choco  = 'awscli'
-        Direct = {
+        Name      = 'AWS CLI v2'
+        Roles     = @('CloudOps', 'All')
+        Winget    = 'Amazon.AWSCLI'
+        Choco     = 'awscli'
+        VerifyCmd = 'aws'
+        Direct    = {
             'https://awscli.amazonaws.com/AWSCLIV2.msi'
         }
-        DArgs  = '/quiet /norestart'
-        DType  = 'msi'
+        DArgs     = '/quiet /norestart'
+        DType     = 'msi'
     }
     @{
-        Name   = 'Terraform'
-        Roles  = @('CloudOps', 'All')
-        Winget = 'Hashicorp.Terraform'
-        Choco  = 'terraform'
-        Direct = {
+        Name      = 'Terraform'
+        Roles     = @('CloudOps', 'All')
+        Winget    = 'Hashicorp.Terraform'
+        Choco     = 'terraform'
+        VerifyCmd = 'terraform'
+        Direct    = {
             $cp  = Invoke-RestMethod 'https://checkpoint-api.hashicorp.com/v1/check/terraform'
             $ver = $cp.current_version
             "https://releases.hashicorp.com/terraform/$ver/terraform_${ver}_windows_amd64.zip"
         }
-        DArgs  = $null
-        DType  = 'zip-to-path'
-        ZipDest = 'C:\Program Files\Terraform'
+        DArgs     = $null
+        DType     = 'zip-to-path'
+        ZipDest   = 'C:\Program Files\Terraform'
     }
     <#  Keeper Commander — disabled 2026-04-20
         pip install keepercommander fails consistently on NinjaOne SYSTEM sessions:
