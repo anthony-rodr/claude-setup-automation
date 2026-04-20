@@ -41,6 +41,8 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Continue'
 
+$ScriptVersion = 'GIT_COMMIT_HASH'  # Stamped by Package-Release.ps1 — copy stamped script to NinjaOne
+
 $SetupDir = Split-Path $ManifestPath -Parent
 $TaskName = 'MasterElectronics-ConfigureUserEnvironment'
 
@@ -185,6 +187,44 @@ Write-Log ('=' * 64) 'INFO'
 Write-Log "Manifest: $ManifestPath" 'INFO'
 Write-Log "Installed: $($manifest.StartTime)  Role: $($manifest.Role)" 'INFO'
 Write-Log "Packages to remove: $($packages.Count)" 'INFO'
+
+# ── Version / staleness check ─────────────────────────────────────────────
+try {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13
+    $verResp = Invoke-RestMethod `
+        -Uri 'https://api.github.com/repos/anthony-rodr/claude-setup-automation/commits/main' `
+        -Headers @{ 'User-Agent' = 'claude-setup-automation' } -ErrorAction Stop
+    $latestSha = $verResp.sha.Substring(0, 7)
+    if ($ScriptVersion -eq 'GIT_COMMIT_HASH') {
+        Write-Log "  Script version: $ScriptVersion  [UNSTAMPED — run Package-Release.ps1 then re-copy to NinjaOne]" 'WARN'
+        if (-not $Force) {
+            $ans = Read-Host '  Script version is not stamped. Were you intending to run this? Type YES to continue'
+            if ($ans -ne 'YES') { Write-Log 'Rollback cancelled.' 'INFO'; exit 0 }
+        }
+    } elseif ($latestSha -eq $ScriptVersion) {
+        Write-Log "  Script version: $ScriptVersion  [current]" 'OK'
+    } else {
+        Write-Log "  Script version: $ScriptVersion  [OUTDATED — repo is $latestSha — update NinjaOne]" 'FAIL'
+        if (-not $Force) {
+            $ans = Read-Host "  This script is outdated (repo is at $latestSha). Were you intending to run this version? Type YES to continue"
+            if ($ans -ne 'YES') { Write-Log 'Rollback cancelled.' 'INFO'; exit 0 }
+        }
+    }
+} catch {
+    Write-Log "  Script version: $ScriptVersion  [version check unavailable]" 'WARN'
+}
+# ─────────────────────────────────────────────────────────────────────────
+
+# ── Notify signed-on users ────────────────────────────────────────────────────
+Write-Log 'Notifying signed-on users…' 'INFO'
+try {
+    $notifyMsg = 'IT Update: Developer tools are being removed from this machine. This will take a few minutes. Please save your work — a restart may be required when complete.'
+    & "$env:SystemRoot\System32\msg.exe" * /TIME:120 $notifyMsg 2>&1 | Out-Null
+    Write-Log '  Notification sent to signed-on users.' 'OK'
+} catch {
+    Write-Log "  Could not send user notification (no active sessions or msg.exe unavailable): $_" 'WARN'
+}
+# ─────────────────────────────────────────────────────────────────────────────
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Confirmation

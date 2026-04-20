@@ -231,3 +231,33 @@ $manifest | ForEach-Object { Write-Step "  $($_.Package.PadRight(18)) $($_.Versi
 Write-Step ''
 Write-Step 'Upload both assets to the GitHub Release:' 'Green'
 Write-Step '  gh release upload v1.0 claude-setup-automation.zip VERSIONS.md --clobber' 'Green'
+
+# ── 10. Stamp NinjaOne scripts with current git commit hash ──────────────────
+Write-Step ''
+Write-Step 'Stamping NinjaOne scripts with current git commit hash…'
+try {
+    $hash = (& git -C $ProjectRoot rev-parse --short HEAD 2>&1).Trim()
+    if ($LASTEXITCODE -ne 0 -or $hash -notmatch '^[0-9a-f]{7}$') {
+        Write-Step "  WARNING: Could not read git commit hash (got: '$hash') — skipping stamp." 'Yellow'
+    } else {
+        $ninjaScripts = @('Deploy-DevEnvironment.ps1', 'Rollback-DevEnvironment.ps1')
+        foreach ($scriptName in $ninjaScripts) {
+            $scriptPath = Join-Path $PSScriptRoot $scriptName
+            $content    = [System.IO.File]::ReadAllText($scriptPath)
+            $stamped    = $content -replace '\$ScriptVersion\s*=\s*''[^'']*''', "`$ScriptVersion = '$hash'"
+            if ($stamped -ne $content) {
+                [System.IO.File]::WriteAllText($scriptPath, $stamped, [System.Text.Encoding]::UTF8)
+                Write-Step "  Stamped: $scriptName  (commit $hash)" 'Green'
+            } else {
+                Write-Step "  WARNING: `$ScriptVersion line not found in $scriptName — not stamped." 'Yellow'
+            }
+        }
+        Write-Step ''
+        Write-Step 'NEXT STEPS:' 'Yellow'
+        Write-Step "  1. Copy the stamped scripts into NinjaOne (both show commit $hash)." 'Yellow'
+        Write-Step '  2. Restore the placeholder in the repo so git stays clean:' 'Yellow'
+        Write-Step '       git checkout -- scripts/Deploy-DevEnvironment.ps1 scripts/Rollback-DevEnvironment.ps1' 'Yellow'
+    }
+} catch {
+    Write-Step "  WARNING: Stamp step failed: $_" 'Yellow'
+}

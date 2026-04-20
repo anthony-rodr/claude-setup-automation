@@ -17,6 +17,8 @@
     Tested:  Windows 11
 #>
 
+$ScriptVersion = 'GIT_COMMIT_HASH'  # Stamped by Package-Release.ps1 — copy stamped script to NinjaOne
+
 # ── Configuration ─────────────────────────────────────────────────────────────
 # Stable URL — always points to the latest release asset named claude-setup-automation.zip.
 # To deploy a new version: replace the asset on the GitHub release (keep the same filename).
@@ -42,6 +44,48 @@ function Write-Step {
 try {
     New-Item -ItemType Directory -Path $StageDir -Force | Out-Null
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13
+
+    # ── Startup banner + staleness check ──────────────────────────────────────
+    Write-Host ('=' * 64)
+    Write-Host '  Master Electronics — Developer Environment DEPLOY'
+    Write-Host ('=' * 64)
+    Write-Host "  Script version: $ScriptVersion" -NoNewline
+    try {
+        $verResp = Invoke-RestMethod `
+            -Uri 'https://api.github.com/repos/anthony-rodr/claude-setup-automation/commits/main' `
+            -Headers @{ 'User-Agent' = 'claude-setup-automation' } -ErrorAction Stop
+        $latestSha = $verResp.sha.Substring(0, 7)
+        if ($ScriptVersion -eq 'GIT_COMMIT_HASH') {
+            Write-Host '  [UNSTAMPED — run Package-Release.ps1 then re-copy to NinjaOne]' -ForegroundColor Yellow
+            if ([System.Environment]::UserInteractive) {
+                $ans = Read-Host '  Script version is not stamped. Were you intending to run this? Type YES to continue'
+                if ($ans -ne 'YES') { Write-Host 'Deployment cancelled.' -ForegroundColor Cyan; exit 0 }
+            }
+        } elseif ($latestSha -eq $ScriptVersion) {
+            Write-Host '  [current]' -ForegroundColor Green
+        } else {
+            Write-Host "  [OUTDATED — repo is $latestSha — update NinjaOne]" -ForegroundColor Red
+            if ([System.Environment]::UserInteractive) {
+                $ans = Read-Host "  This script is outdated (repo is at $latestSha). Were you intending to run this version? Type YES to continue"
+                if ($ans -ne 'YES') { Write-Host 'Deployment cancelled.' -ForegroundColor Cyan; exit 0 }
+            }
+        }
+    } catch {
+        Write-Host '  [version check unavailable]' -ForegroundColor Yellow
+    }
+    Write-Host ('=' * 64)
+    # ─────────────────────────────────────────────────────────────────────────
+
+    # ── Notify signed-on users ────────────────────────────────────────────────
+    Write-Step 'Notifying signed-on users…'
+    try {
+        $notifyMsg = 'IT Update: Developer tools are being deployed to this machine. This will take 15-30 minutes. Please save your work — a restart may be required when complete.'
+        & "$env:SystemRoot\System32\msg.exe" * /TIME:120 $notifyMsg 2>&1 | Out-Null
+        Write-Step '  Notification sent to signed-on users.'
+    } catch {
+        Write-Step "  Could not send user notification (no active sessions or msg.exe unavailable): $_"
+    }
+    # ─────────────────────────────────────────────────────────────────────────
 
     # 1. Check if the bundle is already current by fetching VERSIONS.md (~2 KB)
     #    and comparing against the last deployed version on disk.

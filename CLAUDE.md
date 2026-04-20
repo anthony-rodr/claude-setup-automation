@@ -12,6 +12,8 @@ This is NOT run on the dev machine. Never confuse the two.
 ## Deployment workflow
 1. Run `scripts/Package-Release.ps1` on the DEV machine — downloads bundled installers into `bundled/`, builds `claude-setup-automation.zip`
    - Re-runs are fast: already-present files in `bundled/` are skipped (delete a file to force refresh)
+   - **Also stamps** `Deploy-DevEnvironment.ps1` and `Rollback-DevEnvironment.ps1` in-place with `git rev-parse --short HEAD`
+   - After copying stamped scripts to NinjaOne, restore placeholders: `git checkout -- scripts/Deploy-DevEnvironment.ps1 scripts/Rollback-DevEnvironment.ps1`
 2. Commit changes and upload zip + VERSIONS.md to GitHub release:
    - Push via SSH only (HTTPS broken — libcurl DLL conflict from Docker/AWS CLI)
    - Remote: `git@github.com:anthony-rodr/claude-setup-automation.git`
@@ -111,9 +113,20 @@ present in the extracted directory. Falls through to full download if either che
 - Added `Claude.lnk` to public desktop cleanup list
 - **NinjaOne rollback script still needs manual update** — target machines ran old version in last test
 
+## Session 8 changes (2026-04-20)
+- **Version stamp + staleness check** implemented in Deploy and Rollback (commit this session):
+  - `$ScriptVersion = 'GIT_COMMIT_HASH'` placeholder in both scripts
+  - At startup: fetches GitHub API (`/commits/main`), compares 7-char SHA, prints green `[current]` or red `[OUTDATED]`
+  - Outdated/unstamped prompts tech to confirm with YES (Deploy: gates on `UserInteractive`; Rollback: gates on `-Force`)
+  - `Package-Release.ps1` step 10 stamps both scripts after zip build; prints reminder to restore placeholder after NinjaOne copy
+- **User notification via `msg.exe`** added to both Deploy and Rollback at startup:
+  - Deploy: *"IT Update: Developer tools are being deployed… 15-30 minutes… save your work — restart may be required"*
+  - Rollback: *"IT Update: Developer tools are being removed… few minutes… save your work — restart may be required"*
+- **Post-reboot rollback verified**: all tools confirmed uninstalled via NinjaOne PS terminal (Claude Desktop not explicitly checked)
+
 ## Known issues / open items
-- **NinjaOne scripts out of date**: Deploy-DevEnvironment.ps1 and Rollback-DevEnvironment.ps1 must be manually copied into NinjaOne when changed — last rollback test confirmed old version still running
-- **Version stamp missing**: No version/commit info in script headers — tech cannot tell which version NinjaOne is running. Plan: embed git commit hash + GitHub API staleness check (green = current, red = outdated). **NOT YET IMPLEMENTED** — next session
+- **NinjaOne scripts out of date**: Deploy and Rollback must be stamped (run Package-Release.ps1) then manually copied into NinjaOne after each change
+- **Claude Desktop rollback unverified**: post-reboot check confirmed other tools removed; Claude Desktop MSIX status not explicitly checked
 - **Python rollback**: no uninstall string in registry for machine-wide Python; fix: use bundled `ME_Python_3_12.exe /quiet /uninstall`
 - **Claude Desktop shortcut**: not appearing on public desktop — requires new zip with Configure-UserEnvironment.ps1 changes
 - **Rollback not fully tested**: last test ran old NinjaOne script; need re-test with updated script
@@ -122,17 +135,16 @@ present in the extracted directory. Falls through to full download if either che
 - **fix-encoding.ps1**: appends extra blank lines to unchanged PS1 files each run — minor nuisance
 - KSM licensing needed for Keeper Commander re-enable
 
-## Dev machine state (as of session 7, 2026-04-20)
+## Dev machine state (as of session 8, 2026-04-20)
 - Keeper Commander installed on dev machine: `C:\Python314\Scripts\keeper.exe`
 - SSH key pair: Windows ssh-agent service set to Automatic; PS profile loads key at login
 - PS profile: `~\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1`
 - Keeper login works (Zscaler CA appended to `C:\Python314\Lib\site-packages\certifi\cacert.pem`)
 - Keeper uses SSO — non-interactive access requires KSM (not licensed yet)
 
-## Next steps (as of 2026-04-20 session 7)
-1. **Update NinjaOne** with latest Deploy-DevEnvironment.ps1 and Rollback-DevEnvironment.ps1 from repo
-2. **Rebuild zip** (`Package-Release.ps1` + upload) — many Install-DevEnvironment.ps1 and Configure-UserEnvironment.ps1 changes pending
-3. **Add version stamp + staleness check** to Deploy and Rollback scripts: embed git commit hash, fetch GitHub API at startup, print green if current / red if outdated
-4. **Re-test rollback** with updated NinjaOne script
-5. Fix Python rollback: use bundled `ME_Python_3_12.exe /quiet /uninstall`
-6. Request KSM licensing from Keeper admin
+## Next steps (as of 2026-04-20 session 8)
+1. **Run Package-Release.ps1** — stamps scripts, builds zip, upload to GitHub release
+2. **Update NinjaOne** with stamped Deploy-DevEnvironment.ps1 and Rollback-DevEnvironment.ps1, then restore placeholder (`git checkout --`)
+3. **Re-test rollback** with updated NinjaOne script; explicitly verify Claude Desktop MSIX removal
+4. Fix Python rollback: use bundled `ME_Python_3_12.exe /quiet /uninstall`
+5. Request KSM licensing from Keeper admin
