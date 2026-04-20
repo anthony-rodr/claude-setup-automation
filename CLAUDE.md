@@ -11,12 +11,14 @@ This is NOT run on the dev machine. Never confuse the two.
 
 ## Deployment workflow
 1. Run `scripts/Package-Release.ps1` on the DEV machine — downloads bundled installers into `bundled/`, builds `claude-setup-automation.zip`
-2. Commit changes and upload zip to GitHub release:
+   - Re-runs are fast: already-present files in `bundled/` are skipped (delete a file to force refresh)
+2. Commit changes and upload zip + VERSIONS.md to GitHub release:
    - Push via SSH only (HTTPS broken — libcurl DLL conflict from Docker/AWS CLI)
    - Remote: `git@github.com:anthony-rodr/claude-setup-automation.git`
    - SSH key: `C:\Users\adm_arodriguez\.ssh\id_ed25519`
-   - Upload: `gh release upload v1.0 claude-setup-automation.zip --clobber`
+   - Upload: `gh release upload v1.0 claude-setup-automation.zip VERSIONS.md --clobber`
 3. NinjaOne runs `Deploy-DevEnvironment.ps1` on target machines — pulls zip from GitHub, extracts, runs installer as SYSTEM
+4. **Deploy-DevEnvironment.ps1 and Rollback-DevEnvironment.ps1 are stored directly in NinjaOne** — must be updated there manually when changed
 
 **NinjaOne deploy URL:**
 `https://github.com/anthony-rodr/claude-setup-automation/releases/latest/download/claude-setup-automation.zip`
@@ -24,7 +26,8 @@ This is NOT run on the dev machine. Never confuse the two.
 ## Install architecture (runs on remote machines as SYSTEM)
 Order of operations in `Install-DevEnvironment.ps1`:
 1. **Bulk Choco install** — `choco install scripts/packages.config` for packages with NO bundled version
-2. **Per-package loop** with four tiers per package:
+2. **Per-package loop** with skip-if-installed pre-check, then four tiers per package:
+   - **Pre-check**: `VerifyCmd` (CLI command present) or `VerifyAppx` (MSIX provisioned) → skip entirely
    - **Tier 0**: Bundled installer in `bundled/` — local, no network, fastest
    - **Tier 1**: Chocolatey fallback
    - **Tier 2**: Direct download fallback
@@ -52,15 +55,29 @@ Bundled packages (git, vscode, gh, awscli, terraform) are intentionally excluded
 Tier 0 (local) first, Choco only if that fails. Putting them in packages.config caused Choco
 to download them from the internet before Tier 0 could run (~7 min wasted per deployment).
 
-## New packages added (session 4)
+## Skip-if-installed (VerifyCmd / VerifyAppx) — added session 7
+All CLI packages now have `VerifyCmd` so they are skipped entirely (no download, no install)
+if the command is already on PATH. Critical for redeployment to partially-configured machines.
+| Package | VerifyCmd/VerifyAppx |
+|---------|---------------------|
+| Git | `git` |
+| VS Code | `code` |
+| PowerShell 7 | `pwsh` |
+| nvm | `nvm` — especially important: zip-to-path would wipe existing node versions |
+| Python 3.12 | `python` |
+| GitHub CLI | `gh` |
+| Docker Desktop | `docker` — reinstall resets settings |
+| AWS CLI v2 | `aws` |
+| Terraform | `terraform` |
+| Claude Desktop | `VerifyAppx = '*Claude*'` — checks provisioned MSIX |
+
+## Package notes
 - **Keeper Commander** — **disabled 2026-04-20** (block-commented in Install-DevEnvironment.ps1)
-  - pip install fails consistently on NinjaOne SYSTEM sessions: Zscaler SSL inspection
-    blocks pypi.org even after CA cert injection into certifi bundle (Runs 4, 5, 6)
+  - pip install fails consistently: Zscaler blocks pypi.org at network level even after CA cert injection
   - Do NOT re-enable until KSM is licensed and a non-pip delivery method is available
-    (e.g. a pre-built wheel bundled in the zip, or a Choco/winget package)
-- **Claude Desktop** (`Choco = 'claude'`, `DType = 'msix'`) — Choco primary, MSIX direct fallback from Anthropic CDN
-  - MSIX handler uses `Add-AppxProvisionedPackage` (machine-wide, all users) not `Add-AppxPackage` (per-user, fails as SYSTEM)
-  - **Not yet tested** — needs Run 3
+- **Claude Desktop** — `DType = 'msix'`, uses `Add-AppxProvisionedPackage` (machine-wide)
+  - `VerifyAppx = '*Claude*'` skips if already provisioned
+  - Public desktop shortcut created by `Configure-UserEnvironment.ps1` via `Get-AppxPackage -AllUsers`
 
 ## Key design decisions
 - **Python has `Choco = $null`** — choco python312 exits 1638 when registry remnants exist
@@ -68,77 +85,54 @@ to download them from the internet before Tier 0 could run (~7 min wasted per de
 - **nvm has `Choco = $null` and `Winget = $null`** — choco nvm no-ops as SYSTEM, winget installs per-user; use nvm-noinstall.zip direct
 - **WSL2 uses `wsl.exe --install`**, not Choco or winget
 - **Claude Code installed via npm** to machine-wide prefix `C:\ProgramData\npm`
-- **Claude needed a reboot** on first test — PATH changes require new session (expected, not a bug)
-- **VS Code shortcut shows 2/3** — VS Code installer creates its own Public Desktop shortcut, per-user copy correctly skipped
+- **winget does NOT work as SYSTEM in NinjaOne** — stripped PATH; never use Start-Process winget directly; use Start-Job as fallback only
+- **reg.exe must use full path** `$env:SystemRoot\System32\reg.exe` in SYSTEM sessions — bare `reg` fails
 
-## Test run results
+## Bundle version check
+Deploy-DevEnvironment.ps1 fetches `VERSIONS.md` (~2 KB) from the release before downloading
+the full zip. Skips 300+ MB download if versions match AND `Install-DevEnvironment.ps1` is
+present in the extracted directory. Falls through to full download if either check fails.
 
-### Run 1 (2026-04-18, old scripts)
-- Duration: **19 min 22 sec** — 12/12 packages, 0 failures
-- Bulk Choco was ~9 min (was downloading bundled packages — fixed in packages.config)
-- Claude required reboot before working (expected). VS Code extensions confirmed present.
+## Run history
+- Run 1 (2026-04-18): 19m 22s — 12/12, bulk Choco slow (bundled pkgs in packages.config — fixed)
+- Run 2 (2026-04-18): ~13m — 11/12, Python failed (bootstrapper exits fast before child msiexec completes)
+- Run 3 (2026-04-18): 17m 56s — 11/14, Python same failure, Claude Desktop per-user not provisioned
+- Run 4 (2026-04-20): Python 3.12 INSTALLED, pip hung on Keeper (Zscaler blocked pypi.org)
+- Run 5 (2026-04-20): pip still failed — CA cert injection works but Zscaler blocks at network level; Keeper disabled
+- Run 6 (2026-04-20): **24m 43s — 12/12, 0 failures**; VS Code extensions confirmed, Claude installed; Claude public desktop shortcut missing (fixed in zip — needs redeploy)
 
-### Run 2 (2026-04-18, current scripts — packages.config fix applied)
-- 11/12 packages installed — only Python failed (cascaded to Keeper Commander)
-- Duration: ~13 min (verify-install timestamp: 14:53, bulk Choco started ~14:40)
-- **Root causes confirmed from logs (session 5):**
-  - Python EXE installer exits 0 in ~3 seconds — bootstrapper spawns child msiexec and exits; script moved on before Python files landed. `C:\Program Files\Python312\` never created.
-  - msiexec exit 1619 on bundled GitHub CLI and AWS CLI MSIs — unresolved `..` in path passed to msiexec.exe. Both fell through to Choco successfully (not a real failure).
-  - Keeper Commander: correctly skipped — Python not found at any AltPath or Scripts\ location
-- **Fixes applied and pushed (commits ea35ecc, 11620e9):**
-  - Python: poll AltPaths up to 90s after EXE exits; throw if python.exe never appears; refresh session PATH (root + Scripts\) on success
-  - msiexec: resolve path with GetFullPath() before calling msiexec
-  - Verify: added Keeper Commander + Claude Desktop checks, duration in summary
+## Rollback fixes (session 7, 2026-04-20) — commit f1328f8
+- Added `bundled` switch case: routes to `Invoke-RegistryUninstall`; Terraform force-removes directory
+- Added `pre-existing` switch case: skips silently, not flagged as error
+- Claude Desktop: `Remove-AppxProvisionedPackage` + `Remove-AppxPackage -AllUsers` in `direct` handler
+- Fixed `DisplayName` StrictMode crash in `direct` registry fallback
+- WSL2: `wsl.exe --uninstall` instead of failing winget call
+- `reg.exe` full path (`$env:SystemRoot\System32\reg.exe`) throughout
+- Added `Claude.lnk` to public desktop cleanup list
+- **NinjaOne rollback script still needs manual update** — target machines ran old version in last test
 
 ## Known issues / open items
-- **Python install fails (Run 2)** — root cause unknown pending log review.
-  Theory: Python Launcher ordering. Do NOT fix until logs confirm cause.
-- **Python rollback fails**: Registry uninstall string missing for machine-wide Python install.
-  Rollback falls back to winget which also fails. Python files survive rollback.
-  Fix needed: use bundled `ME_Python_3_12.exe /quiet /uninstall` in rollback script.
-- **VS Code rollback**: Earlier runs used force-remove only (left registry entries). Now uses
-  `choco uninstall vscode` + force-remove — should be clean.
-- AWS CLI choco uninstall times out in rollback — force cleanup handles it
+- **NinjaOne scripts out of date**: Deploy-DevEnvironment.ps1 and Rollback-DevEnvironment.ps1 must be manually copied into NinjaOne when changed — last rollback test confirmed old version still running
+- **Version stamp missing**: No version/commit info in script headers — tech cannot tell which version NinjaOne is running. Plan: embed git commit hash + GitHub API staleness check (green = current, red = outdated). **NOT YET IMPLEMENTED** — next session
+- **Python rollback**: no uninstall string in registry for machine-wide Python; fix: use bundled `ME_Python_3_12.exe /quiet /uninstall`
+- **Claude Desktop shortcut**: not appearing on public desktop — requires new zip with Configure-UserEnvironment.ps1 changes
+- **Rollback not fully tested**: last test ran old NinjaOne script; need re-test with updated script
 - WSL2 cannot be removed without a reboot
-- Rollback verification is PATH-only — can miss off-PATH installs
 - libcurl DLL conflict (from Docker/AWS CLI) breaks git HTTPS — always use SSH for pushes
-- PSScriptAnalyzer warnings in Install-DevEnvironment.ps1 (pre-existing):
-  Ensure-Winget, Ensure-Chocolatey, Configure-ExistingProfiles use unapproved verbs; unused $launcherSrc; $null comparison side
+- **fix-encoding.ps1**: appends extra blank lines to unchanged PS1 files each run — minor nuisance
+- KSM licensing needed for Keeper Commander re-enable
 
-## Dev machine state (as of session 6, 2026-04-20)
+## Dev machine state (as of session 7, 2026-04-20)
 - Keeper Commander installed on dev machine: `C:\Python314\Scripts\keeper.exe`
 - SSH key pair: Windows ssh-agent service set to Automatic; PS profile loads key at login
 - PS profile: `~\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1`
 - Keeper login works (Zscaler CA appended to `C:\Python314\Lib\site-packages\certifi\cacert.pem`)
 - Keeper uses SSO — non-interactive access requires KSM (not licensed yet)
-- KSM licensing: needs to be requested from Keeper admin — blocker for full secrets automation
 
-## Run history
-- Run 1 (2026-04-18): 19m 22s — 12/12, bulk Choco was slow (bundled pkgs in packages.config)
-- Run 2 (2026-04-18): ~13m — 11/12, Python failed (bootstrapper exits fast, child msiexec never completes)
-- Run 3 (2026-04-18): 17m 56s — 11/14, Python same failure, Claude Desktop installed per-user not provisioned
-- Run 4 (2026-04-20): Python 3.12 INSTALLED (pre-cleanup fixed ghost MSI), pip hung on Keeper (Zscaler blocked pypi.org)
-- Run 5 (2026-04-20): pip still failed — CA cert injection works but Zscaler blocks pypi.org at network level; Keeper Commander disabled
-- Run 6 (2026-04-20): 24m 43s — 12/12, 0 failures; VS Code extensions confirmed, Claude installed; missing Claude public desktop shortcut (fixed)
-
-## Known issues / open items
-- **Python rollback**: winget not found as SYSTEM (stripped PATH in NinjaOne); also `reg` not found — need full paths
-- **reg.exe / powershell.exe**: rollback script uses bare `reg` which fails in stripped-PATH SYSTEM sessions — fix: use `$env:SystemRoot\System32\reg.exe` full path
-- **Rollback leaves Python files**: no uninstall string in registry for machine-wide Python; winget fallback fails as SYSTEM
-- **Claude Desktop**: untested in Run 4 (script stopped at pip) — verify in Run 5
-- **KSM licensing**: needed for non-interactive Keeper access / broader secrets automation
-- **fix-encoding.ps1**: appends extra blank lines to unchanged PS1 files each run — minor nuisance
-- WSL2 cannot be removed without a reboot
-- libcurl DLL conflict (from Docker/AWS CLI) breaks git HTTPS — always use SSH for pushes
-
-## Bundle version check (added session 6)
-Deploy-DevEnvironment.ps1 now fetches `VERSIONS.md` (~2 KB) from the release before downloading
-the full zip. If versions match what's on disk, the 300+ MB download and extraction are skipped.
-Upload command going forward: `gh release upload v1.0 claude-setup-automation.zip VERSIONS.md --clobber`
-
-## Next steps (as of 2026-04-20)
-1. Run 6 on test machine — verify Claude Desktop MSIX installs machine-wide (Keeper Commander now disabled)
-2. Fix rollback: use full paths for `reg.exe` and `powershell.exe` (stripped PATH in NinjaOne SYSTEM sessions)
-3. Fix Python rollback: use bundled `ME_Python_3_12.exe /quiet /uninstall` instead of winget
-4. Request KSM licensing from Keeper admin — needed before Keeper Commander can be re-enabled
-5. Fix fix-encoding.ps1 trailing blank lines issue
+## Next steps (as of 2026-04-20 session 7)
+1. **Update NinjaOne** with latest Deploy-DevEnvironment.ps1 and Rollback-DevEnvironment.ps1 from repo
+2. **Rebuild zip** (`Package-Release.ps1` + upload) — many Install-DevEnvironment.ps1 and Configure-UserEnvironment.ps1 changes pending
+3. **Add version stamp + staleness check** to Deploy and Rollback scripts: embed git commit hash, fetch GitHub API at startup, print green if current / red if outdated
+4. **Re-test rollback** with updated NinjaOne script
+5. Fix Python rollback: use bundled `ME_Python_3_12.exe /quiet /uninstall`
+6. Request KSM licensing from Keeper admin
