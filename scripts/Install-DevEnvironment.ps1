@@ -738,6 +738,27 @@ function Install-ViaDirectDownload {
                             }
                         }
                     }
+                    # 5) Remove Python Launcher files from disk — py.exe lives in C:\Windows\
+                    # and has its own MSI product registration. A ghost Launcher registration
+                    # causes the Python installer's Launcher sub-MSI to fail silently (exit 0
+                    # from parent but python.exe never appears). Remove both the files and any
+                    # remaining Launcher MSI products not caught by the *Python* name filter above.
+                    foreach ($launcherFile in @('C:\Windows\py.exe', 'C:\Windows\pyw.exe')) {
+                        if (Test-Path $launcherFile) {
+                            Remove-Item $launcherFile -Force -ErrorAction SilentlyContinue
+                            Write-Log "  Pre-install: removed $launcherFile" 'DIAG'
+                        }
+                    }
+                    if (Test-Path $msiProductsPath) {
+                        Get-ChildItem $msiProductsPath -ErrorAction SilentlyContinue | ForEach-Object {
+                            $mp  = Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue
+                            $mpn = if ($mp -and $mp.PSObject.Properties['ProductName']) { $mp.PSObject.Properties['ProductName'].Value } else { $null }
+                            if ($mpn -and $mpn -like '*Launcher*') {
+                                Remove-Item $_.PSPath -Recurse -Force -ErrorAction SilentlyContinue
+                                Write-Log "  Pre-install: removed Launcher MSI product: $mpn" 'DIAG'
+                            }
+                        }
+                    }
                     Write-Log "  Pre-install cleanup complete." 'DIAG'
                 }
 
@@ -919,6 +940,15 @@ function Install-ViaDirectDownload {
                             $env:Path = "$env:Path;$addDir"
                             Write-Log "  Session PATH refreshed to include: $addDir" 'DIAG'
                         }
+                    }
+                    # Smoke test — confirm the interpreter is actually functional before
+                    # proceeding to pip installs. A present-but-broken python.exe would
+                    # cause Keeper Commander to fail with a confusing error downstream.
+                    $pyVer = & "$foundDir\python.exe" --version 2>&1
+                    if ($LASTEXITCODE -eq 0) {
+                        Write-Log "  Python smoke test OK: $pyVer" 'OK'
+                    } else {
+                        throw "python.exe found at $foundDir but '--version' failed (exit $LASTEXITCODE) — install incomplete"
                     }
                 }
             }
@@ -1735,6 +1765,7 @@ if ($failCount -gt 0) {
 
 Write-Log "Full log: $LogPath" 'INFO'
 exit 0
+
 
 
 
