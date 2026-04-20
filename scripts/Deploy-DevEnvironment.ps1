@@ -25,9 +25,11 @@
 $PackageUrl = 'https://github.com/anthony-rodr/claude-setup-automation/releases/latest/download/claude-setup-automation.zip'
 
 # Where to stage the downloaded zip and extracted contents
-$StageDir   = 'C:\ProgramData\MasterElectronics\Deploy'
-$ZipPath    = Join-Path $StageDir 'setup.zip'
-$ExtractDir = Join-Path $StageDir 'package'
+$StageDir        = 'C:\ProgramData\MasterElectronics\Deploy'
+$ZipPath         = Join-Path $StageDir 'setup.zip'
+$ExtractDir      = Join-Path $StageDir 'package'
+$VersionsUrl     = 'https://github.com/anthony-rodr/claude-setup-automation/releases/latest/download/VERSIONS.md'
+$VersionsOnDisk  = Join-Path $StageDir 'VERSIONS.md'
 # ──────────────────────────────────────────────────────────────────────────────
 
 $ErrorActionPreference = 'Stop'
@@ -38,21 +40,50 @@ function Write-Step {
 }
 
 try {
-    # 1. Create staging directory
-    if (Test-Path $ExtractDir) { Remove-Item $ExtractDir -Recurse -Force }
-    New-Item -ItemType Directory -Path $StageDir   -Force | Out-Null
-    New-Item -ItemType Directory -Path $ExtractDir -Force | Out-Null
-
-    # 2. Download package
-    Write-Step "Downloading package from: $PackageUrl"
+    New-Item -ItemType Directory -Path $StageDir -Force | Out-Null
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13
-    Invoke-WebRequest -Uri $PackageUrl -OutFile $ZipPath -UseBasicParsing -ErrorAction Stop
-    Write-Step "Download complete: $ZipPath"
 
-    # 3. Extract
-    Write-Step "Extracting package…"
-    Expand-Archive -Path $ZipPath -DestinationPath $ExtractDir -Force
-    Write-Step "Extraction complete."
+    # 1. Check if the bundle is already current by fetching VERSIONS.md (~2 KB)
+    #    and comparing against the last deployed version on disk.
+    $skipDownload = $false
+    if (Test-Path $ExtractDir) {
+        try {
+            $remoteVersions = Invoke-WebRequest -Uri $VersionsUrl -UseBasicParsing -ErrorAction Stop |
+                              Select-Object -ExpandProperty Content
+            if (Test-Path $VersionsOnDisk) {
+                $localVersions = Get-Content $VersionsOnDisk -Raw
+                if ($remoteVersions.Trim() -eq $localVersions.Trim()) {
+                    Write-Step "Bundle is current (VERSIONS.md matches) — skipping download."
+                    $skipDownload = $true
+                } else {
+                    Write-Step "New version detected — re-downloading bundle."
+                }
+            }
+        } catch {
+            Write-Step "Version check failed ($_) — proceeding with full download."
+        }
+    }
+
+    if (-not $skipDownload) {
+        # 2. Remove stale extract, download and re-extract
+        if (Test-Path $ExtractDir) { Remove-Item $ExtractDir -Recurse -Force }
+        New-Item -ItemType Directory -Path $ExtractDir -Force | Out-Null
+
+        Write-Step "Downloading package from: $PackageUrl"
+        Invoke-WebRequest -Uri $PackageUrl -OutFile $ZipPath -UseBasicParsing -ErrorAction Stop
+        Write-Step "Download complete: $ZipPath"
+
+        # 3. Extract
+        Write-Step "Extracting package…"
+        Expand-Archive -Path $ZipPath -DestinationPath $ExtractDir -Force
+        Write-Step "Extraction complete."
+
+        # Save VERSIONS.md so next run can compare
+        $bundledVersions = Join-Path $ExtractDir 'bundled\VERSIONS.md'
+        if (Test-Path $bundledVersions) {
+            Copy-Item $bundledVersions $VersionsOnDisk -Force
+        }
+    }
 
     # 4. Locate install script (handles both flat and nested zip structures)
     $installScript = Get-ChildItem -Path $ExtractDir -Filter 'Install-DevEnvironment.ps1' -Recurse |

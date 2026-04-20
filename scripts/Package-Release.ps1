@@ -201,6 +201,9 @@ $lines += "- PowerShell 7"
 $lines += ""
 $lines += "Re-run Package-Release.ps1 before each deployment wave to refresh bundled versions."
 $lines | Set-Content (Join-Path $BundledDir 'VERSIONS.md') -Encoding UTF8
+# Also copy to project root — uploaded as a separate release asset so Deploy-DevEnvironment.ps1
+# can fetch just this file (a few KB) to decide whether the full 300+ MB zip needs downloading.
+Copy-Item (Join-Path $BundledDir 'VERSIONS.md') (Join-Path $ProjectRoot 'VERSIONS.md') -Force
 Write-Step "  VERSIONS.md written." 'Green'
 
 # ── 9. Build zip ──────────────────────────────────────────────────────────────
@@ -221,4 +224,5 @@ Write-Step ''
 Write-Step 'Bundled versions:' 'White'
 $manifest | ForEach-Object { Write-Step "  $($_.Package.PadRight(18)) $($_.Version)" 'White' }
 Write-Step ''
-Write-Step 'Upload claude-setup-automation.zip as the asset on the GitHub Release.' 'Green'
+Write-Step 'Upload both assets to the GitHub Release:' 'Green'
+Write-Step '  gh release upload v1.0 claude-setup-automation.zip VERSIONS.md --clobber' 'Green'
