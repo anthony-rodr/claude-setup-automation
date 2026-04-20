@@ -325,7 +325,7 @@ $Packages = @(
         Name   = 'Claude Desktop'
         Roles  = @('Dev', 'All')
         Winget = $null
-        Choco  = 'claude'
+        Choco  = $null   # choco installs as per-user MSIX for SYSTEM, not machine-wide provisioned; use direct MSIX tier
         Direct = {
             'https://claude.ai/api/desktop/win32/x64/msix/latest/redirect'
         }
@@ -1735,6 +1735,7 @@ if ($failCount -gt 0) {
 
 Write-Log "Full log: $LogPath" 'INFO'
 exit 0
+
 
 
 
