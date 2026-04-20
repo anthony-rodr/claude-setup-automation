@@ -17,7 +17,7 @@
     Tested:  Windows 11
 #>
 
-$ScriptVersion = 'GIT_COMMIT_HASH'  # Stamped by Package-Release.ps1 — copy stamped script to NinjaOne
+$ScriptVersion = 'd3e9bb7'  # Stamped by Package-Release.ps1 — copy stamped script to NinjaOne
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 # Stable URL — always points to the latest release asset named claude-setup-automation.zip.
@@ -56,17 +56,14 @@ try {
             -Headers @{ 'User-Agent' = 'claude-setup-automation' } -ErrorAction Stop
         $latestSha = $verResp.sha.Substring(0, 7)
         if ($ScriptVersion -eq 'GIT_COMMIT_HASH') {
-            Write-Host '  [UNSTAMPED — run Package-Release.ps1 then re-copy to NinjaOne]' -ForegroundColor Yellow
-            if ([System.Environment]::UserInteractive) {
-                $ans = Read-Host '  Script version is not stamped. Were you intending to run this? Type YES to continue'
-                if ($ans -ne 'YES') { Write-Host 'Deployment cancelled.' -ForegroundColor Cyan; exit 0 }
-            }
+            # Pulled live from GitHub — always current, no stamp needed
+            Write-Host "  [live — main @ $latestSha]" -ForegroundColor Green
         } elseif ($latestSha -eq $ScriptVersion) {
-            Write-Host '  [current]' -ForegroundColor Green
+            Write-Host "  [$ScriptVersion — current]" -ForegroundColor Green
         } else {
-            Write-Host "  [OUTDATED — repo is $latestSha — update NinjaOne]" -ForegroundColor Red
+            Write-Host "  [$ScriptVersion — OUTDATED, repo is $latestSha]" -ForegroundColor Red
             if ([System.Environment]::UserInteractive) {
-                $ans = Read-Host "  This script is outdated (repo is at $latestSha). Were you intending to run this version? Type YES to continue"
+                $ans = Read-Host "  This script is outdated. Were you intending to run this version? Type YES to continue"
                 if ($ans -ne 'YES') { Write-Host 'Deployment cancelled.' -ForegroundColor Cyan; exit 0 }
             }
         }

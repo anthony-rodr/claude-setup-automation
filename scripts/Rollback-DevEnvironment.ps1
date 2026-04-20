@@ -41,7 +41,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Continue'
 
-$ScriptVersion = 'GIT_COMMIT_HASH'  # Stamped by Package-Release.ps1 — copy stamped script to NinjaOne
+$ScriptVersion = 'd3e9bb7'  # Stamped by Package-Release.ps1 — copy stamped script to NinjaOne
 
 $SetupDir = Split-Path $ManifestPath -Parent
 $TaskName = 'MasterElectronics-ConfigureUserEnvironment'
@@ -196,17 +196,14 @@ try {
         -Headers @{ 'User-Agent' = 'claude-setup-automation' } -ErrorAction Stop
     $latestSha = $verResp.sha.Substring(0, 7)
     if ($ScriptVersion -eq 'GIT_COMMIT_HASH') {
-        Write-Log "  Script version: $ScriptVersion  [UNSTAMPED — run Package-Release.ps1 then re-copy to NinjaOne]" 'WARN'
-        if (-not $Force) {
-            $ans = Read-Host '  Script version is not stamped. Were you intending to run this? Type YES to continue'
-            if ($ans -ne 'YES') { Write-Log 'Rollback cancelled.' 'INFO'; exit 0 }
-        }
+        # Pulled live from GitHub — always current, no stamp needed
+        Write-Log "  Script version: live — main @ $latestSha" 'OK'
     } elseif ($latestSha -eq $ScriptVersion) {
         Write-Log "  Script version: $ScriptVersion  [current]" 'OK'
     } else {
-        Write-Log "  Script version: $ScriptVersion  [OUTDATED — repo is $latestSha — update NinjaOne]" 'FAIL'
+        Write-Log "  Script version: $ScriptVersion  [OUTDATED — repo is $latestSha]" 'FAIL'
         if (-not $Force) {
-            $ans = Read-Host "  This script is outdated (repo is at $latestSha). Were you intending to run this version? Type YES to continue"
+            $ans = Read-Host "  This script is outdated. Were you intending to run this version? Type YES to continue"
             if ($ans -ne 'YES') { Write-Log 'Rollback cancelled.' 'INFO'; exit 0 }
         }
     }
