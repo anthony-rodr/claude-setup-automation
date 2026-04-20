@@ -129,8 +129,14 @@ to download them from the internet before Tier 0 could run (~7 min wasted per de
 - WSL2 cannot be removed without a reboot
 - libcurl DLL conflict (from Docker/AWS CLI) breaks git HTTPS — always use SSH for pushes
 
+## Bundle version check (added session 6)
+Deploy-DevEnvironment.ps1 now fetches `VERSIONS.md` (~2 KB) from the release before downloading
+the full zip. If versions match what's on disk, the 300+ MB download and extraction are skipped.
+Upload command going forward: `gh release upload v1.0 claude-setup-automation.zip VERSIONS.md --clobber`
+
 ## Next steps (as of 2026-04-20)
 1. Run 5 on test machine — verify Keeper Commander pip install (CA cert fix), Claude Desktop MSIX
-2. Fix rollback: use full paths for `reg.exe`, fix Python uninstall (use bundled EXE /uninstall)
-3. Request KSM licensing from Keeper admin
-4. Fix fix-encoding.ps1 trailing blank lines issue
+2. Fix rollback: use full paths for `reg.exe` and `powershell.exe` (stripped PATH in NinjaOne SYSTEM sessions)
+3. Fix Python rollback: use bundled `ME_Python_3_12.exe /quiet /uninstall` instead of winget
+4. Request KSM licensing from Keeper admin
+5. Fix fix-encoding.ps1 trailing blank lines issue
