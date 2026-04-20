@@ -336,7 +336,55 @@ foreach ($pkg in $packages) {
                 }
             }
         }
+        'bundled' {
+            # Tier-0 (bundled) installs use the same uninstallers as choco/direct.
+            # Route to the registry uninstaller (handles MSI, INNO, NSIS, etc.).
+            Write-Log "  Bundled install — trying registry uninstaller for '$($pkg.Name)'…" 'DIAG'
+            $removed = Invoke-RegistryUninstall -DisplayNamePattern "*$($pkg.Name)*"
+            if ($removed) {
+                Write-Log "  Registry uninstall OK: $($pkg.Name)" 'OK'
+            } elseif ($pkg.Name -like '*Terraform*') {
+                # Terraform is zip-to-path — no registry entry; force-remove directory.
+                $tfDir = 'C:\Program Files\Terraform'
+                if (Test-Path $tfDir) {
+                    Remove-Item $tfDir -Recurse -Force -ErrorAction SilentlyContinue
+                    Write-Log '  Force removed Terraform directory.' 'OK'
+                    $removed = $true
+                }
+            }
+        }
+        'pre-existing' {
+            # Was already installed before our run — don't touch it.
+            Write-Log "  Pre-existing install — skipping uninstall for '$($pkg.Name)'." 'DIAG'
+            $removed = $true
+        }
         'direct' {
+            # Claude Desktop — provisioned MSIX; uninstall via Remove-AppxProvisionedPackage.
+            if ($pkg.Name -eq 'Claude Desktop') {
+                Write-Log '  Removing provisioned Claude Desktop MSIX…' 'DIAG'
+                try {
+                    $provPkg = Get-AppxProvisionedPackage -Online -ErrorAction SilentlyContinue |
+                               Where-Object { $_.DisplayName -like '*Claude*' } |
+                               Select-Object -First 1
+                    if ($provPkg) {
+                        Remove-AppxProvisionedPackage -Online -PackageName $provPkg.PackageName `
+                            -ErrorAction Stop | Out-Null
+                        Write-Log "  AppxProvisioned removed: $($provPkg.DisplayName)" 'OK'
+                    } else {
+                        Write-Log '  Claude Desktop provisioned package not found — may already be removed.' 'DIAG'
+                    }
+                    # Also remove per-user packages for any logged-in users.
+                    Get-AppxPackage -AllUsers -Name '*Claude*' -ErrorAction SilentlyContinue |
+                        ForEach-Object {
+                            Remove-AppxPackage -Package $_.PackageFullName -AllUsers `
+                                -ErrorAction SilentlyContinue
+                            Write-Log "  Removed per-user AppX: $($_.Name)" 'DIAG'
+                        }
+                    $removed = $true
+                } catch {
+                    Write-Log "  Claude Desktop MSIX removal failed: $_" 'WARN'
+                }
+            }
             # nvm-noinstall.zip has no uninstaller — remove the directory and registry entries directly.
             if ($pkg.Name -eq 'nvm-windows') {
                 $nvmHome    = [System.Environment]::GetEnvironmentVariable('NVM_HOME',    'Machine')
@@ -377,18 +425,21 @@ foreach ($pkg in $packages) {
 
             # For all other direct installs (and nvm if directory removal failed),
             # attempt winget uninstall by display name as best effort.
-            if (-not $removed -and $pkg.WingetId) {
-                Write-Log "  Attempting winget uninstall for direct-installed '$($pkg.Name)'…" 'DIAG'
-                $proc = Start-Process -FilePath 'winget' `
-                    -ArgumentList "uninstall --id $($pkg.WingetId) --silent" `
-                    -PassThru -NoNewWindow
-                $finished = $proc.WaitForExit(120000)
-                if (-not $finished) {
-                    $proc.Kill()
-                    Write-Log "  winget uninstall timed out — killed." 'WARN'
-                } elseif ($proc.ExitCode -eq 0) {
-                    Write-Log "  winget uninstall OK" 'OK'
-                    $removed = $true
+            # WSL2 — wsl.exe is the only reliable way to remove it as SYSTEM.
+            # winget is not available in stripped-PATH SYSTEM sessions (NinjaOne).
+            if (-not $removed -and $pkg.Name -eq 'Windows Subsystem for Linux 2') {
+                Write-Log '  Uninstalling WSL2 via wsl.exe --uninstall…' 'DIAG'
+                try {
+                    $p = Start-Process "$env:SystemRoot\System32\wsl.exe" `
+                             -ArgumentList '--uninstall' -Wait -PassThru -NoNewWindow
+                    if ($p.ExitCode -eq 0) {
+                        Write-Log '  wsl.exe --uninstall OK (reboot required).' 'OK'
+                        $removed = $true
+                    } else {
+                        Write-Log "  wsl.exe --uninstall exited $($p.ExitCode)." 'WARN'
+                    }
+                } catch {
+                    Write-Log "  wsl.exe --uninstall failed: $_" 'WARN'
                 }
             }
             if (-not $removed) {
@@ -398,7 +449,7 @@ foreach ($pkg in $packages) {
                     'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
                 )
                 $entry = Get-ItemProperty $uninstallKey -ErrorAction SilentlyContinue |
-                         Where-Object { $_.DisplayName -like "*$($pkg.Name)*" } |
+                         Where-Object { $_.PSObject.Properties['DisplayName'] -and $_.DisplayName -like "*$($pkg.Name)*" } |
                          Select-Object -First 1
                 if ($entry -and $entry.UninstallString) {
                     Write-Log "  Running uninstall string: $($entry.UninstallString)" 'DIAG'
@@ -604,7 +655,7 @@ foreach ($profDir in $userProfiles) {
     $hiveKey    = "HKU\METemp_$uname"
 
     try {
-        & reg load $hiveKey $hivePath 2>&1 | Out-Null
+        & "$env:SystemRoot\System32\reg.exe" load $hiveKey $hivePath 2>&1 | Out-Null
         $regPath = "Registry::HKEY_USERS\METemp_$uname\Environment"
 
         # If reg load failed (NTUSER.DAT locked — user has an active session), fall back to
@@ -636,7 +687,7 @@ foreach ($profDir in $userProfiles) {
     } finally {
         [gc]::Collect()
         [gc]::WaitForPendingFinalizers()
-        & reg unload $hiveKey 2>&1 | Out-Null
+        & "$env:SystemRoot\System32\reg.exe" unload $hiveKey 2>&1 | Out-Null
     }
 }
 
@@ -775,7 +826,7 @@ Get-ChildItem 'C:\Users' -Directory -ErrorAction SilentlyContinue |
         $hivePath = Join-Path $_.FullName 'NTUSER.DAT'
         $hiveKey  = "HKU\MEClean_$uname"
         try {
-            & reg load $hiveKey $hivePath 2>&1 | Out-Null
+            & "$env:SystemRoot\System32\reg.exe" load $hiveKey $hivePath 2>&1 | Out-Null
             $hkuUninstall = "Registry::HKEY_USERS\MEClean_$uname\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"
             if (Test-Path $hkuUninstall) {
                 foreach ($pattern in $managedUninstallPatterns) {
@@ -794,7 +845,7 @@ Get-ChildItem 'C:\Users' -Directory -ErrorAction SilentlyContinue |
         } finally {
             [gc]::Collect()
             [gc]::WaitForPendingFinalizers()
-            & reg unload $hiveKey 2>&1 | Out-Null
+            & "$env:SystemRoot\System32\reg.exe" unload $hiveKey 2>&1 | Out-Null
         }
     }
 
@@ -997,7 +1048,7 @@ if ($apiKey) {
 # ─────────────────────────────────────────────────────────────────────────────
 Write-Log '' 'INFO'
 Write-Log '=== Removing Public Desktop shortcuts ===' 'INFO'
-foreach ($lnkName in @('Visual Studio Code', 'Git Bash', 'Developer Setup Guide')) {
+foreach ($lnkName in @('Visual Studio Code', 'Git Bash', 'Developer Setup Guide', 'Claude')) {
     $lnk = "C:\Users\Public\Desktop\$lnkName.lnk"
     if (Test-Path $lnk) {
         Remove-Item $lnk -Force -ErrorAction SilentlyContinue
