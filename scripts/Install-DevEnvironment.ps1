@@ -1412,8 +1412,40 @@ proxy: none
         Write-Log "  Created machine-wide npm prefix: $claudeNpmPrefix" 'DIAG'
     }
 
+    # ── Skip if Claude Code is already installed and functional ───────────────
+    # Check the machine-wide prefix binary first (our preferred location).
+    # If not there, probe PATH — but only skip if claude actually responds to
+    # --version.  A broken binary that throws must still be repaired.
+    # Run the check in a background job so a hung or missing exe can't crash
+    # this script (ErrorActionPreference = Stop is active in the outer scope).
+    $claudePrefixBin = Join-Path $claudeNpmPrefix 'node_modules\@anthropic-ai\claude-code\bin\claude.exe'
+    $alreadyAtPrefix = Test-Path $claudePrefixBin
+    if (-not $alreadyAtPrefix) {
+        $existingCmd = Get-Command claude -ErrorAction SilentlyContinue
+        if ($existingCmd) {
+            Write-Log "  claude found on PATH at $($existingCmd.Source) — verifying it works…" 'DIAG'
+            $testVer = try {
+                $job = Start-Job -ScriptBlock { & claude --version 2>&1 | Select-Object -First 1 }
+                $result = $null
+                if ($job | Wait-Job -Timeout 8) { $result = (Receive-Job $job) -join '' }
+                Remove-Job $job -Force -ErrorAction SilentlyContinue
+                $result
+            } catch { $null }
+
+            if ($testVer -match '\d') {
+                Write-Log "  Claude Code already installed and functional ($testVer) — skipping npm install." 'OK'
+                $entry.Success = $true
+                $Manifest.Packages.Add($entry)
+                Save-Manifest
+                return
+            } else {
+                Write-Log "  claude found on PATH but not functional ($testVer) — will reinstall." 'WARN'
+            }
+        }
+    }
+
     for ($i = 1; $i -le $MaxRetries; $i++) {
-        $action = if (Test-Path (Join-Path $claudeNpmPrefix 'claude.cmd')) { 'Upgrading' } else { 'Installing' }
+        $action = if ($alreadyAtPrefix -or (Test-Path (Join-Path $claudeNpmPrefix 'claude.cmd'))) { 'Upgrading' } else { 'Installing' }
         Write-Log "  $action Claude Code via npm (attempt $i)…" 'DIAG'
         $prevEap = $ErrorActionPreference
         $ErrorActionPreference = 'SilentlyContinue'
@@ -1423,7 +1455,15 @@ proxy: none
             if ($env:Path -notlike "*$claudeNpmPrefix*") { $env:Path = "$env:Path;$claudeNpmPrefix" }
             Update-SessionPath
             $claudeCmd = Get-Command claude -ErrorAction SilentlyContinue
-            $ver = if ($claudeCmd) { (& claude --version 2>&1) -join '' } else { 'installed (PATH refresh required)' }
+            $ver = try {
+                if ($claudeCmd) {
+                    $job = Start-Job -ScriptBlock { & claude --version 2>&1 | Select-Object -First 1 }
+                    $r = $null
+                    if ($job | Wait-Job -Timeout 8) { $r = (Receive-Job $job) -join '' }
+                    Remove-Job $job -Force -ErrorAction SilentlyContinue
+                    if ($r) { $r } else { 'installed (version check timed out)' }
+                } else { 'installed (PATH refresh required)' }
+            } catch { 'installed (check error)' }
             Write-Log "  Claude Code installed/updated ($ver)." 'OK'
             $entry.Success = $true
             break
