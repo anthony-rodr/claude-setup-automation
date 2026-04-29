@@ -706,7 +706,12 @@ function Install-ViaDirectDownload {
                 -ArgumentList @('/online', '/enable-feature', '/featurename:VirtualMachinePlatform', '/all', '/norestart') `
                 -TimeoutSeconds 600 -Label 'dism-vmp'
 
-            if ($wslResult.ExitCode -in @(0,3010) -and $vmpResult.ExitCode -in @(0,3010)) {
+            # Invoke-Process may return null ExitCode on some Windows builds even when
+            # the process completes successfully. Fall back to output string matching.
+            $wslOk = $wslResult.ExitCode -in @(0,3010) -or $wslResult.Output -match '(?i)operation completed successfully'
+            $vmpOk = $vmpResult.ExitCode -in @(0,3010) -or $vmpResult.Output -match '(?i)operation completed successfully'
+
+            if ($wslOk -and $vmpOk) {
                 Write-Log '  WSL features enabled. Reboot required before WSL can be used.' 'OK'
                 return $true
             }
@@ -915,7 +920,8 @@ function Install-NodeThroughNvm {
     Write-Log "Running: nvm use $useArg" 'DIAG'
 
     $use = Invoke-Process -FilePath $nvmExe -ArgumentList @('use', $useArg) -TimeoutSeconds 300 -Label 'nvm'
-    if ($use.ExitCode -ne 0) {
+    $useSucceeded = $use.ExitCode -eq 0 -or $use.Output -match '(?i)now using node'
+    if (-not $useSucceeded) {
         Add-InstallError "nvm use $useArg failed. $($use.Output)"
         return $false
     }
