@@ -877,6 +877,45 @@ proxy: none
     Update-SessionPath
 }
 
+function Install-NodeFromBundle {
+    [OutputType([bool])]
+    param()
+
+    $bundledZip = Join-Path (Join-Path $PSScriptRoot '..\bundled') 'ME_Node_LTS.zip'
+    if (-not (Test-Path $bundledZip)) {
+        Write-Log 'ME_Node_LTS.zip not found in bundled/. Cannot fall back to bundled Node.' 'WARN'
+        return $false
+    }
+
+    $extractTemp = Join-Path $TempDir 'node-extract'
+    if (Test-Path $extractTemp) { Remove-Item $extractTemp -Recurse -Force -ErrorAction SilentlyContinue }
+    New-Item -ItemType Directory -Path $extractTemp -Force | Out-Null
+
+    Expand-Archive -Path $bundledZip -DestinationPath $extractTemp -Force
+
+    $nodeDir = Get-ChildItem $extractTemp -Directory -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $nodeDir -or -not (Test-Path (Join-Path $nodeDir.FullName 'node.exe'))) {
+        Write-Log 'Could not find node.exe inside ME_Node_LTS.zip.' 'WARN'
+        return $false
+    }
+
+    if ($nodeDir.Name -notmatch 'node-(v[\d.]+)-win') {
+        Write-Log "Could not parse Node version from directory name: $($nodeDir.Name)" 'WARN'
+        return $false
+    }
+    $nodeVersion = $Matches[1]
+    $versionDir = Join-Path $NvmHome $nodeVersion
+
+    if (Test-Path $versionDir) {
+        Remove-Item $versionDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Move-Item $nodeDir.FullName $versionDir
+    Remove-Item $extractTemp -Force -ErrorAction SilentlyContinue
+
+    Write-Log "Node $nodeVersion extracted from bundle to $versionDir" 'OK'
+    return $true
+}
+
 function Repair-NodeSymlink {
     $installedNode = Get-ChildItem $NvmHome -Directory -ErrorAction SilentlyContinue |
         Where-Object { Test-Path (Join-Path $_.FullName 'node.exe') } |
@@ -974,6 +1013,23 @@ function Install-NodeThroughNvm {
 
     Update-SessionPath
     Add-MachinePath $NvmSymlink
+
+    # Verify nvm actually downloaded node. nvm can print "Installation complete" and
+    # "Now using node vX" without placing any files if nodejs.org is unreachable
+    # (e.g. blocked by Zscaler). Fall back to the bundled Node LTS zip in that case.
+    $nvmNodePresent = $null -ne (
+        Get-ChildItem $NvmHome -Directory -ErrorAction SilentlyContinue |
+        Where-Object { Test-Path (Join-Path $_.FullName 'node.exe') } |
+        Select-Object -First 1
+    )
+
+    if (-not $nvmNodePresent) {
+        Write-Log 'nvm did not download Node.js (likely network blocked). Falling back to bundled ME_Node_LTS.zip.' 'WARN'
+        if (-not (Install-NodeFromBundle)) {
+            Add-InstallError 'nvm download failed and bundled Node LTS zip fallback also failed. Cannot install Node.'
+            return $false
+        }
+    }
 
     # Explicitly rebuild the junction after nvm use. nvm silently prints "Now using
     # node" but may not create the junction if $NvmSymlink existed as any kind of

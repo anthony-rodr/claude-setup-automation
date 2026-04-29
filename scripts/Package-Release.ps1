@@ -206,6 +206,20 @@ try {
     Write-Step "  WARNING: PowerShell 7 download failed: $_ - skipping." 'Yellow'
 }
 
+# ── 9b. Node.js LTS zip (bundled to avoid relying on nvm network download on targets) ──
+Write-Step 'Resolving Node.js LTS zip...'
+try {
+    $nodeIdx = Invoke-RestMethod 'https://nodejs.org/dist/index.json'
+    $nodeLts = $nodeIdx | Where-Object { $_.lts -ne $false } | Select-Object -First 1
+    $nodeVer = $nodeLts.version
+    $nodeUrl = "https://nodejs.org/dist/$nodeVer/node-$nodeVer-win-x64.zip"
+    Write-Step "  Node.js LTS version: $nodeVer"
+    $sz = Invoke-Fetch $nodeUrl (Join-Path $BundledDir 'ME_Node_LTS.zip')
+    $manifest.Add([pscustomobject]@{ Package='Node.js LTS'; Version=$nodeVer; File='ME_Node_LTS.zip'; SizeMB=[math]::Round($sz,1) })
+} catch {
+    Write-Step "  WARNING: Node.js LTS download failed: $_ - skipping." 'Yellow'
+}
+
 # ── 10. Write VERSIONS.md manifest ───────────────────────────────────────────
 Write-Step 'Writing VERSIONS.md manifest…'
 $commitHash = try { (& git -C $ProjectRoot rev-parse --short HEAD 2>&1).Trim() } catch { 'unknown' }
@@ -240,6 +254,7 @@ $requiredBundles = @(
     'ME_Visual_Studio_Code.exe',
     'ME_PowerShell_7.msi',
     'ME_nvm_windows.zip',
+    'ME_Node_LTS.zip',
     'ME_Python_3_12.exe',
     'ME_GitHub_CLI.msi',
     'ME_AWS_CLI_v2.msi',
