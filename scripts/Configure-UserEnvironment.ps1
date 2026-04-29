@@ -367,22 +367,16 @@ function Install-VsCodeExtensions {
     }
     $extensions = Get-Content $extListFile | ConvertFrom-Json
 
-    $extArgs = if (-not $runningAsUser) {
-        $extDir = Join-Path $UserProfile '.vscode\extensions'
-        Initialize-Dir $extDir
-        Write-Log "  Installing extensions to user dir: $extDir" 'DIAG'
-        @('--extensions-dir', $extDir)
-    } else {
-        @()
-    }
-
+    $successCount = 0
     foreach ($ext in $extensions) {
+
         Write-Log "  Installing VS Code extension: $ext" 'DIAG'
         try {
-            $out    = & $codeExe --install-extension $ext --force @extArgs 2>&1
+            $out    = & $codeExe --install-extension $ext --force 2>&1
             $outStr = ($out -join ' ').Trim()
             if ($LASTEXITCODE -eq 0) {
                 Write-Log "  Extension OK: $ext" 'OK'
+                $successCount++
             } else {
                 Write-Log "  Extension warning ($ext, exit $LASTEXITCODE): $outStr" 'WARN'
             }
@@ -390,6 +384,7 @@ function Install-VsCodeExtensions {
             Write-Log "  Extension install failed ($ext): $_" 'WARN'
         }
     }
+    return $successCount
 }
 
 # -----------------------------------------------------------------------------
@@ -467,14 +462,20 @@ if (-not (Test-Path $coreMarker)) {
 
 if ($SkipVsCodeExtensions) {
     Write-Log 'Skipping VS Code extensions (-SkipVsCodeExtensions set).' 'DIAG'
+} elseif (-not $runningAsUser) {
+    Write-Log 'Skipping VS Code extensions (not running as target user session).' 'DIAG'
 } elseif (Test-Path $extMarker) {
     Write-Log 'VS Code extensions already configured.' 'DIAG'
 } else {
-    Install-VsCodeExtensions
+    $installed = Install-VsCodeExtensions
 
-    Initialize-Dir (Join-Path $UserProfile '.claude')
-    Set-Content $extMarker -Value (Get-Date -Format 'o') -Encoding UTF8
-    Write-Log 'VS Code extensions configured. Extension marker written.' 'OK'
+    if ($installed -gt 0) {
+        Initialize-Dir (Join-Path $UserProfile '.claude')
+        Set-Content $extMarker -Value (Get-Date -Format 'o') -Encoding UTF8
+        Write-Log "VS Code extensions configured ($installed installed). Extension marker written." 'OK'
+    } else {
+        Write-Log 'VS Code extensions: 0 installed successfully — marker NOT written; will retry at next logon.' 'WARN'
+    }
 }
 
 Show-VerificationReport

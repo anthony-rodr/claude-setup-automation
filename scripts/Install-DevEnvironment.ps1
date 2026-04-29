@@ -1400,7 +1400,7 @@ function Configure-ExistingProfiles {
             $job = Start-Job -ScriptBlock {
                 param($script, $profilePath, $setupDir)
                 & powershell.exe -NonInteractive -NoProfile -ExecutionPolicy Bypass `
-                    -File $script -UserProfile $profilePath -SetupDir $setupDir 2>&1
+                    -File $script -UserProfile $profilePath -SetupDir $setupDir -SkipVsCodeExtensions 2>&1
             } -ArgumentList $ConfigScript, $prof, $SetupDir
 
             $running.Add([pscustomobject]@{
