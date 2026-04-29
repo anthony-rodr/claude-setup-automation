@@ -87,7 +87,11 @@ function Write-Log {
     $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
     $line = "[$ts][$Level] $Msg"
 
-    Add-Content -Path $LogPath -Value $line -Encoding UTF8
+    # Retry on file lock — a surviving process from a prior run can briefly
+    # hold the log file. A transient lock must not crash the installer.
+    for ($attempt = 0; $attempt -lt 3; $attempt++) {
+        try { Add-Content -Path $LogPath -Value $line -Encoding UTF8 -ErrorAction Stop; break } catch { Start-Sleep -Milliseconds 300 }
+    }
 
     $color = switch ($Level) {
         'OK'   { 'Green' }
@@ -224,6 +228,11 @@ function Invoke-Process {
         -NoNewWindow
 
     $done = $p.WaitForExit($TimeoutSeconds * 1000)
+
+    # WaitForExit(ms) does not guarantee ExitCode is populated on PS 5.1.
+    # Calling WaitForExit() (no arg) after a successful timed wait flushes
+    # pending events and ensures ExitCode is set.
+    if ($done) { $p.WaitForExit() }
 
     if (-not $done) {
         try { $p.Kill() } catch { }
