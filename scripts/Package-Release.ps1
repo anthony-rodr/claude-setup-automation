@@ -1,28 +1,29 @@
-﻿#Requires -Version 5.1
+#Requires -Version 5.1
 <#
 .SYNOPSIS
     Builds the claude-setup-automation.zip release package.
 
 .DESCRIPTION
     Downloads the latest version of each bundled installer into bundled/, then
-    zips the entire project — scripts/, chatbot/, bundled/ — as
-    claude-setup-automation.zip in the project root.
+    zips scripts/ and bundled/ as claude-setup-automation.zip in the project root.
 
-    Bundled installers let Install-DevEnvironment.ps1 deploy with zero network
-    downloads.  Each URL is resolved dynamically so the zip always ships the
-    latest stable release at build time.
+    Bundled installers let Install-DevEnvironment.ps1 deploy with minimal network
+    activity on target machines.  Each URL is resolved dynamically so the zip
+    always ships the latest stable release at build time.
 
-    Bundled packages (in order of size, largest last):
-      VS Code        — always-latest redirect from Microsoft CDN
-      Git for Windows — latest release from GitHub API
-      AWS CLI v2     — always-latest MSI from Amazon CDN
-      Python 3.12    — latest 3.12.x from GitHub API / python.org fallback
-      GitHub CLI     — latest release from GitHub API
-      Terraform      — latest release from HashiCorp checkpoint API
+    Bundled packages (in order, largest last):
+      VS Code          — always-latest redirect from Microsoft CDN
+      Git for Windows  — latest release from GitHub API
+      AWS CLI v2       — always-latest MSI from Amazon CDN
+      Python 3.12      — latest 3.12.x from GitHub API / python.org fallback
+      GitHub CLI       — latest release from GitHub API
+      Terraform        — latest release from HashiCorp checkpoint API
+      nvm-windows      — latest nvm-noinstall.zip from GitHub API (required)
+      PowerShell 7     — latest win-x64 MSI from GitHub API (required)
 
-    NOT bundled (too large or handled well by Chocolatey at runtime):
-      Docker Desktop  — ~600 MB; Chocolatey handles it reliably
-      PowerShell 7    — ~100 MB; Chocolatey handles it reliably
+    NOT bundled (downloaded at runtime by the installer):
+      Docker Desktop  — ~600 MB; Chocolatey + direct fallback at install time
+      Claude Desktop  — MSIX downloaded directly at install time
 
     A VERSIONS.md manifest is written to bundled/ so IT can see exactly what
     versions are in the zip and when it was built.  Re-run this script before
@@ -111,10 +112,7 @@ $buildDate = (Get-Date).ToUniversalTime().ToString('yyyy-MM-dd HH:mm:ss UTC')
 Write-Step 'Resolving VS Code installer…'
 $vscodeDest = Join-Path $BundledDir 'ME_Visual_Studio_Code.exe'
 $sz = Invoke-Fetch 'https://update.code.visualstudio.com/latest/win32-x64/stable' $vscodeDest
-# Extract version from the downloaded EXE description (best-effort)
-$vscodeVer = try {
-    (Get-Item $vscodeDest).VersionInfo.ProductVersion
-} catch { 'latest' }
+$vscodeVer = try { (Get-Item $vscodeDest).VersionInfo.ProductVersion } catch { 'latest' }
 $manifest.Add([pscustomobject]@{ Package='VS Code'; Version=$vscodeVer; File='ME_Visual_Studio_Code.exe'; SizeMB=[math]::Round($sz,1) })
 
 # ── 3. Git for Windows ────────────────────────────────────────────────────────
@@ -186,12 +184,36 @@ try {
     Write-Step "  WARNING: Terraform download failed: $_ - skipping." 'Yellow'
 }
 
-# ── 8. Write VERSIONS.md manifest ────────────────────────────────────────────
+# ── 8. nvm-windows (required — nvm is a mandatory dependency for Node/Claude) ──
+Write-Step 'Resolving nvm-windows portable zip…'
+try {
+    $nvm = Resolve-GitHubLatest 'coreybutler/nvm-windows' '^nvm-noinstall\.zip$'
+    Write-Step "  nvm-windows version: $($nvm.Version)  ($($nvm.Name))"
+    $sz = Invoke-Fetch $nvm.Url (Join-Path $BundledDir 'ME_nvm_windows.zip')
+    $manifest.Add([pscustomobject]@{ Package='nvm-windows'; Version=$nvm.Version; File='ME_nvm_windows.zip'; SizeMB=[math]::Round($sz,1) })
+} catch {
+    Write-Step "  WARNING: nvm-windows download failed: $_ - skipping." 'Yellow'
+}
+
+# ── 9. PowerShell 7 (required — Choco hung 52 min in Run 7; bundle to guarantee install) ──
+Write-Step 'Resolving PowerShell 7 installer…'
+try {
+    $ps = Resolve-GitHubLatest 'PowerShell/PowerShell' 'win-x64\.msi$'
+    Write-Step "  PowerShell version: $($ps.Version)  ($($ps.Name))"
+    $sz = Invoke-Fetch $ps.Url (Join-Path $BundledDir 'ME_PowerShell_7.msi')
+    $manifest.Add([pscustomobject]@{ Package='PowerShell 7'; Version=$ps.Version; File='ME_PowerShell_7.msi'; SizeMB=[math]::Round($sz,1) })
+} catch {
+    Write-Step "  WARNING: PowerShell 7 download failed: $_ - skipping." 'Yellow'
+}
+
+# ── 10. Write VERSIONS.md manifest ───────────────────────────────────────────
 Write-Step 'Writing VERSIONS.md manifest…'
+$commitHash = try { (& git -C $ProjectRoot rev-parse --short HEAD 2>&1).Trim() } catch { 'unknown' }
 $lines = @(
     "# Bundled Installer Versions"
     ""
     "Built: $buildDate"
+    "Commit: $commitHash"
     ""
     "| Package | Version | File | Size |"
     "|---------|---------|------|------|"
@@ -200,24 +222,41 @@ foreach ($m in $manifest) {
     $lines += "| $($m.Package) | $($m.Version) | $($m.File) | $($m.SizeMB) MB |"
 }
 $lines += ""
-$lines += "**Not bundled** (installed at runtime by Chocolatey):"
-$lines += "- Docker Desktop"
-$lines += "- PowerShell 7"
+$lines += "**Not bundled** (downloaded at runtime by the installer):"
+$lines += "- Docker Desktop  (~600 MB — Chocolatey + direct fallback)"
+$lines += "- Claude Desktop  (MSIX — direct download)"
 $lines += ""
 $lines += "Re-run Package-Release.ps1 before each deployment wave to refresh bundled versions."
 $lines | Set-Content (Join-Path $BundledDir 'VERSIONS.md') -Encoding UTF8
 # Also copy to project root — uploaded as a separate release asset so Deploy-DevEnvironment.ps1
-# can fetch just this file (a few KB) to decide whether the full 300+ MB zip needs downloading.
+# can fetch just this file (a few KB) to decide whether the full zip needs downloading.
 Copy-Item (Join-Path $BundledDir 'VERSIONS.md') (Join-Path $ProjectRoot 'VERSIONS.md') -Force
 Write-Step "  VERSIONS.md written." 'Green'
 
-# ── 9. Build zip ──────────────────────────────────────────────────────────────
+# ── 11. Verify all required bundles are present before packaging ───────────────
+Write-Step 'Verifying required bundles…'
+$requiredBundles = @(
+    'ME_Git_for_Windows.exe',
+    'ME_Visual_Studio_Code.exe',
+    'ME_PowerShell_7.msi',
+    'ME_nvm_windows.zip',
+    'ME_Python_3_12.exe',
+    'ME_GitHub_CLI.msi',
+    'ME_AWS_CLI_v2.msi',
+    'ME_Terraform.zip'
+)
+$missing = $requiredBundles | Where-Object { -not (Test-Path (Join-Path $BundledDir $_)) }
+if ($missing) {
+    throw "Required bundled installers missing — fix downloads before packaging:`n  $($missing -join "`n  ")"
+}
+Write-Step "  All required bundles present." 'Green'
+
+# ── 12. Build zip ─────────────────────────────────────────────────────────────
 Write-Step 'Building claude-setup-automation.zip…'
 if (Test-Path $ZipPath) { Remove-Item $ZipPath -Force }
 
 $include = @(
     (Join-Path $ProjectRoot 'scripts'),
-    (Join-Path $ProjectRoot 'chatbot'),
     (Join-Path $ProjectRoot 'bundled')
 ) | Where-Object { Test-Path $_ }
 
@@ -232,7 +271,7 @@ Write-Step ''
 Write-Step 'Upload both assets to the GitHub Release:' 'Green'
 Write-Step '  gh release upload v1.0 claude-setup-automation.zip VERSIONS.md --clobber' 'Green'
 
-# ── 10. Stamp NinjaOne scripts with current git commit hash ──────────────────
+# ── 13. Stamp NinjaOne scripts with current git commit hash ───────────────────
 Write-Step ''
 Write-Step 'Stamping NinjaOne scripts with current git commit hash…'
 try {

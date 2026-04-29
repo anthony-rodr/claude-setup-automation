@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     Configures developer tools for a single Windows user profile.
 
@@ -77,62 +77,7 @@ function Initialize-Dir {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 1. npm prefix — write to user's .npmrc
-#    nvm-windows sets NVM_HOME/NVM_SYMLINK but per-user npm prefix lives in .npmrc
-# ─────────────────────────────────────────────────────────────────────────────
-function Set-NpmPrefix {
-    $npmRcPath  = Join-Path $UserProfile '.npmrc'
-    $npmGlobal  = Join-Path $UserProfile 'AppData\Roaming\npm'
-
-    Initialize-Dir $npmGlobal
-
-    # Only write if prefix line is not already there
-    $existing = if (Test-Path $npmRcPath) { Get-Content $npmRcPath -Raw } else { '' }
-    if ($existing -notmatch 'prefix\s*=') {
-        $prefixLine = "prefix=$($npmGlobal -replace '\\','\\')"
-        Add-Content -Path $npmRcPath -Value $prefixLine -Encoding UTF8
-        Write-Log "npm prefix set to $npmGlobal in .npmrc" 'OK'
-    } else {
-        Write-Log 'npm prefix already configured in .npmrc — skipping.' 'DIAG'
-    }
-}
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 2. PowerShell profile — add PATH entries for npm global and node
-# ─────────────────────────────────────────────────────────────────────────────
-function Set-PowerShellProfile {
-    # Resolve the CurrentUserAllHosts profile path for the target user.
-    # The standard location is Documents\PowerShell\profile.ps1 for PS7
-    # and Documents\WindowsPowerShell\profile.ps1 for Windows PowerShell.
-    $ps7ProfileDir = Join-Path $UserProfile 'Documents\PowerShell'
-    $ps7Profile    = Join-Path $ps7ProfileDir 'profile.ps1'
-    $psWinDir      = Join-Path $UserProfile 'Documents\WindowsPowerShell'
-    $psWinProfile  = Join-Path $psWinDir 'Microsoft.PowerShell_profile.ps1'
-
-    $snippet = @"
-
-# ── Master Electronics DevSetup PATH additions ─────────────────────────────
-`$npmGlobalPath = Join-Path `$env:USERPROFILE 'AppData\Roaming\npm'
-if ((Test-Path `$npmGlobalPath) -and (`$env:Path -notlike "*`$npmGlobalPath*")) {
-    `$env:Path = "`$npmGlobalPath;" + `$env:Path
-}
-# ──────────────────────────────────────────────────────────────────────────
-"@
-
-    foreach ($profilePath in @($ps7Profile, $psWinProfile)) {
-        Initialize-Dir (Split-Path $profilePath -Parent)
-        $existing = if (Test-Path $profilePath) { Get-Content $profilePath -Raw } else { '' }
-        if ($existing -notmatch 'Master Electronics DevSetup PATH') {
-            Add-Content -Path $profilePath -Value $snippet -Encoding UTF8
-            Write-Log "PowerShell profile updated: $profilePath" 'OK'
-        } else {
-            Write-Log "Profile already patched: $profilePath — skipping." 'DIAG'
-        }
-    }
-}
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 3. Claude Code settings — set preferredShell to Git Bash
+# 1. Claude Code settings — set preferredShell to Git Bash
 # ─────────────────────────────────────────────────────────────────────────────
 function Set-ClaudeSettings {
     $gitBashExe  = 'C:\Program Files\Git\bin\bash.exe'
@@ -173,20 +118,26 @@ function Set-ClaudeSettings {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 4. User PATH — ensure npm global, NVM_HOME, and NVM_SYMLINK are in the
-#    user-level PATH registry key (complements the PowerShell profile addition
-#    for non-PS terminals, and ensures any user gets nvm/node on first logon)
+# 2. User PATH — ensure machine-wide tool paths are visible in the user's
+#    PATH registry key.  These paths are already in the machine PATH set by
+#    the installer, but adding them here ensures visibility even on machines
+#    where the machine PATH hasn't propagated to the session yet.
 # ─────────────────────────────────────────────────────────────────────────────
 function Set-UserPath {
-    $npmGlobal  = Join-Path $UserProfile 'AppData\Roaming\npm'
-    # Read nvm paths from machine env at call time so any user gets the correct
-    # literal paths regardless of when they first logged in (NVM_HOME / NVM_SYMLINK
-    # are machine-level env vars set by the nvm installer).
     $nvmHome    = [System.Environment]::GetEnvironmentVariable('NVM_HOME',    'Machine')
     $nvmSymlink = [System.Environment]::GetEnvironmentVariable('NVM_SYMLINK', 'Machine')
 
-    # Build the list of paths to ensure are in the user PATH (skip any that don't exist yet)
-    $pathsToAdd = @($npmGlobal, $nvmHome, $nvmSymlink) | Where-Object { $_ -and (Test-Path $_) }
+    # Machine-wide paths only — per-user npm prefix removed (npm global is C:\ProgramData\npm)
+    $pathsToAdd = @(
+        $nvmHome,
+        $nvmSymlink,
+        'C:\ProgramData\npm'
+    ) | Where-Object { $_ -and (Test-Path $_) }
+
+    if (-not $pathsToAdd) {
+        Write-Log 'No machine-wide tool paths exist yet — skipping user PATH.' 'DIAG'
+        return
+    }
 
     if ($runningAsUser) {
         # We have direct access to HKCU
@@ -294,41 +245,7 @@ function Set-UserPath {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 5. Desktop shortcut — "Developer Setup Guide" pointing to the chatbot launcher
-# ─────────────────────────────────────────────────────────────────────────────
-function New-ChatbotShortcut {
-    $launcher  = Join-Path $SetupDir 'chatbot\Start-DevSetupGuide.cmd'
-    $shortcut  = Join-Path $UserProfile 'Desktop\Developer Setup Guide.lnk'
-
-    if (-not (Test-Path $launcher)) {
-        Write-Log 'Chatbot launcher not found — skipping desktop shortcut.' 'WARN'
-        return
-    }
-
-    if (Test-Path $shortcut) {
-        Write-Log 'Desktop shortcut already exists — skipping.' 'DIAG'
-        return
-    }
-
-    Initialize-Dir (Split-Path $shortcut -Parent)
-
-    try {
-        $wsh    = New-Object -ComObject WScript.Shell
-        $lnk    = $wsh.CreateShortcut($shortcut)
-        $lnk.TargetPath       = $launcher
-        $lnk.WorkingDirectory = Join-Path $SetupDir 'chatbot'
-        $lnk.Description      = 'Master Electronics Developer Environment Setup Guide'
-        # Use the cmd.exe icon (generic terminal look)
-        $lnk.IconLocation     = '%SystemRoot%\system32\cmd.exe,0'
-        $lnk.Save()
-        Write-Log "Desktop shortcut created: $shortcut" 'OK'
-    } catch {
-        Write-Log "Failed to create desktop shortcut: $_" 'WARN'
-    }
-}
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 5b. Desktop shortcuts for developer tools (VS Code, Git Bash)
+# 3. Desktop shortcuts for developer tools (VS Code, Git Bash)
 # ─────────────────────────────────────────────────────────────────────────────
 function New-AppShortcuts {
     $wsh     = New-Object -ComObject WScript.Shell
@@ -338,12 +255,13 @@ function New-AppShortcuts {
     $apps = @(
         @{
             Name        = 'Visual Studio Code'
-            # winget installs to per-user AppData on non-SYSTEM runs; machine-wide as fallback
+            # Machine-wide installer (bundled/direct/choco) always puts VS Code in Program Files.
+            # Per-user AppData path uses $UserProfile to avoid LOCALAPPDATA resolving to SYSTEM's profile.
             Targets     = @(
-                "$env:LOCALAPPDATA\Programs\Microsoft VS Code\Code.exe",
-                'C:\Program Files\Microsoft VS Code\Code.exe'
+                'C:\Program Files\Microsoft VS Code\Code.exe',
+                (Join-Path $UserProfile 'AppData\Local\Programs\Microsoft VS Code\Code.exe')
             )
-            Icon        = $null   # use exe's own icon
+            Icon        = $null
             Description = 'Visual Studio Code'
         },
         @{
@@ -410,7 +328,7 @@ function New-AppShortcuts {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 6. VS Code extensions
+# 4. VS Code extensions
 #    When running as SYSTEM (Configure-ExistingProfiles), install directly into
 #    each user's VS Code data directory via --user-data-dir so extensions are
 #    present on first launch — no logon required.
@@ -420,10 +338,10 @@ function New-AppShortcuts {
 function Install-VsCodeExtensions {
     $codeExe = Get-Command code -ErrorAction SilentlyContinue
     if (-not $codeExe) {
-        # Try common install paths — machine-wide Choco/direct install goes to Program Files
+        # Try common install paths — machine-wide install goes to Program Files
         $candidates = @(
             'C:\Program Files\Microsoft VS Code\bin\code.cmd',
-            "$env:LOCALAPPDATA\Programs\Microsoft VS Code\bin\code.cmd"
+            (Join-Path $UserProfile 'AppData\Local\Programs\Microsoft VS Code\bin\code.cmd')
         )
         $codePath = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
         if (-not $codePath) {
@@ -485,36 +403,6 @@ function Show-VerificationReport {
     Write-Log '  CONFIGURATION VERIFICATION' 'INFO'
     Write-Log ('─' * 64) 'INFO'
 
-    # npm prefix in .npmrc
-    $npmRcPath = Join-Path $UserProfile '.npmrc'
-    if ((Test-Path $npmRcPath) -and ((Get-Content $npmRcPath -Raw -ErrorAction SilentlyContinue) -match 'prefix\s*=')) {
-        Write-Log '  npm prefix        OK' 'OK'
-        $lines += '  npm prefix        OK'
-    } else {
-        Write-Log '  npm prefix        NOT SET' 'WARN'
-        $lines += '  npm prefix        NOT SET'
-    }
-
-    # PS7 profile patched
-    $ps7Profile = Join-Path $UserProfile 'Documents\PowerShell\profile.ps1'
-    if ((Test-Path $ps7Profile) -and ((Get-Content $ps7Profile -Raw -ErrorAction SilentlyContinue) -match 'Master Electronics DevSetup')) {
-        Write-Log '  PS7 profile       OK' 'OK'
-        $lines += '  PS7 profile       OK'
-    } else {
-        Write-Log '  PS7 profile       NOT PATCHED' 'WARN'
-        $lines += '  PS7 profile       NOT PATCHED'
-    }
-
-    # PS5 profile patched
-    $ps5Profile = Join-Path $UserProfile 'Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1'
-    if ((Test-Path $ps5Profile) -and ((Get-Content $ps5Profile -Raw -ErrorAction SilentlyContinue) -match 'Master Electronics DevSetup')) {
-        Write-Log '  PS5 profile       OK' 'OK'
-        $lines += '  PS5 profile       OK'
-    } else {
-        Write-Log '  PS5 profile       NOT PATCHED' 'WARN'
-        $lines += '  PS5 profile       NOT PATCHED'
-    }
-
     # Claude settings.json
     $settingsPath = Join-Path $UserProfile '.claude\settings.json'
     if (Test-Path $settingsPath) {
@@ -525,23 +413,19 @@ function Show-VerificationReport {
         $lines += '  Claude settings   NOT FOUND'
     }
 
-    # User PATH registry entry
-    $regPath  = 'Registry::HKEY_CURRENT_USER\Environment'
-    $userPath = (Get-ItemProperty $regPath -Name Path -ErrorAction SilentlyContinue).Path
-    $npmGlobal = Join-Path $UserProfile 'AppData\Roaming\npm'
-    if ($userPath -and $userPath -like "*npm*") {
-        Write-Log "  User PATH         OK  ($npmGlobal)" 'OK'
-        $lines += "  User PATH         OK  ($npmGlobal)"
+    # Machine PATH contains npm global prefix
+    $machinePath = [System.Environment]::GetEnvironmentVariable('Path', 'Machine')
+    if ($machinePath -like '*ProgramData\npm*') {
+        Write-Log '  Machine PATH      OK  (C:\ProgramData\npm present)' 'OK'
+        $lines += '  Machine PATH      OK  (C:\ProgramData\npm present)'
     } else {
-        Write-Log '  User PATH         npm global missing' 'WARN'
-        $lines += '  User PATH         npm global missing'
+        Write-Log '  Machine PATH      C:\ProgramData\npm missing' 'WARN'
+        $lines += '  Machine PATH      C:\ProgramData\npm missing'
     }
 
-    # Desktop shortcuts — use the target user's profile path, not the running user's
-    # GetFolderPath('Desktop') returns the *current* user's desktop, which is wrong
-    # when this script is invoked by SYSTEM or another admin for a different profile.
+    # Desktop shortcuts
     $desktop  = Join-Path $UserProfile 'Desktop'
-    $expected = @('Developer Setup Guide', 'Visual Studio Code', 'Git Bash')
+    $expected = @('Visual Studio Code', 'Git Bash')
     $found    = $expected | Where-Object { Test-Path (Join-Path $desktop "$_.lnk") }
     $row      = "  Shortcuts         {0}/{1}  ({2})" -f $found.Count, $expected.Count, ($found -join ', ')
     $level    = if ($found.Count -gt 0) { 'OK' } else { 'WARN' }
@@ -571,11 +455,8 @@ if (-not (Test-Path $UserProfile)) {
     exit 1
 }
 
-Set-NpmPrefix
-Set-PowerShellProfile
 Set-ClaudeSettings
 Set-UserPath
-New-ChatbotShortcut
 New-AppShortcuts
 Install-VsCodeExtensions
 
@@ -589,24 +470,3 @@ Set-Content $MarkerFile -Value (Get-Date -Format 'o') -Encoding UTF8
 Write-Log 'Configuration complete. Marker file written.' 'OK'
 
 exit 0
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

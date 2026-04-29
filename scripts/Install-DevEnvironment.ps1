@@ -1422,8 +1422,6 @@ Write-Log "Role: $Role | MaxRetries: $MaxRetries | RunningAsSystem: $RunningAsSy
 Write-Log "Log : $LogPath" 'INFO'
 Write-Log "Temp: $TempDir" 'INFO'
 
-Send-UserNotification -Message 'IT Update: Developer tool installation has started. You can continue working, but some tools may not be available until installation completes and you sign out or restart.' -TimeoutSeconds 120
-
 Set-TlsPolicy
 Set-RequiredExecutionPolicy
 Update-SessionPath

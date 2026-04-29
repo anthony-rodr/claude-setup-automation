@@ -76,7 +76,7 @@ try {
     # ── Notify signed-on users ────────────────────────────────────────────────
     Write-Step 'Notifying signed-on users…'
     try {
-        $notifyMsg = 'IT Update: Developer tools are being deployed to this machine. This will take 15-30 minutes. Please save your work — a restart may be required when complete.'
+        $notifyMsg = 'IT Update: Developer tools are being deployed to this machine. This may take a while. Please save your work — a restart or sign-out may be required when complete.'
         & "$env:SystemRoot\System32\msg.exe" * /TIME:120 $notifyMsg 2>&1 | Out-Null
         Write-Step '  Notification sent to signed-on users.'
     } catch {
@@ -141,11 +141,29 @@ try {
     }
     Write-Step "Found install script: $($installScript.FullName)"
 
-    # 5. Run installer
+    # Verify required files are present before handing off to the installer
+    $scriptRoot = Split-Path $installScript.FullName -Parent
+    $pkgRoot    = Split-Path $scriptRoot -Parent
+    $required = @(
+        'scripts\Install-DevEnvironment.ps1',
+        'scripts\Configure-UserEnvironment.ps1',
+        'bundled\ME_nvm_windows.zip',
+        'bundled\ME_PowerShell_7.msi'
+    )
+    foreach ($rel in $required) {
+        if (-not (Test-Path (Join-Path $pkgRoot $rel))) {
+            throw "Required package file missing after extraction: $rel"
+        }
+    }
+    Write-Step "Package integrity check passed."
+
+    # 5. Run installer — spawn a new PowerShell process so execution policy and
+    #    streams are controlled independently of the NinjaOne SYSTEM session.
     Write-Step "Starting installation…"
-    & $installScript.FullName
-    Write-Step "Installation script completed with exit code: $LASTEXITCODE"
-    exit $LASTEXITCODE
+    powershell.exe -ExecutionPolicy Bypass -NoProfile -File $installScript.FullName *>&1
+    $exitCode = $LASTEXITCODE
+    Write-Step "Installation script completed with exit code: $exitCode"
+    exit $exitCode
 
 } catch {
     Write-Host "[ERROR] Deployment failed: $_" -ForegroundColor Red

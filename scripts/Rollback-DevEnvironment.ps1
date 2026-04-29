@@ -375,18 +375,42 @@ foreach ($pkg in $packages) {
         }
         'bundled' {
             # Tier-0 (bundled) installs use the same uninstallers as choco/direct.
-            # Route to the registry uninstaller (handles MSI, INNO, NSIS, etc.).
-            Write-Log "  Bundled install — trying registry uninstaller for '$($pkg.Name)'…" 'DIAG'
-            $removed = Invoke-RegistryUninstall -DisplayNamePattern "*$($pkg.Name)*"
-            if ($removed) {
-                Write-Log "  Registry uninstall OK: $($pkg.Name)" 'OK'
+            # Route to registry uninstall first (MSI, INNO, NSIS, etc.).
+            # zip-to-path packages (Terraform, nvm-windows) have no registry entry
+            # and are handled by explicit directory removal below.
+            if ($pkg.Name -eq 'nvm-windows') {
+                $nvmHome    = [System.Environment]::GetEnvironmentVariable('NVM_HOME',    'Machine')
+                $nvmSymlink = [System.Environment]::GetEnvironmentVariable('NVM_SYMLINK', 'Machine')
+                if (-not $nvmHome)    { $nvmHome    = 'C:\ProgramData\nvm'      }
+                if (-not $nvmSymlink) { $nvmSymlink = 'C:\Program Files\nodejs' }
+
+                Remove-Item $nvmHome    -Recurse -Force -ErrorAction SilentlyContinue
+                Remove-Item $nvmSymlink -Recurse -Force -ErrorAction SilentlyContinue
+                [System.Environment]::SetEnvironmentVariable('NVM_HOME',    $null, 'Machine')
+                [System.Environment]::SetEnvironmentVariable('NVM_SYMLINK', $null, 'Machine')
+
+                $mp    = [System.Environment]::GetEnvironmentVariable('Path', 'Machine')
+                $newMp = ($mp -split ';' | Where-Object { $_ -and $_ -ne $nvmHome -and $_ -ne $nvmSymlink }) -join ';'
+                if ($newMp -ne $mp) {
+                    [System.Environment]::SetEnvironmentVariable('Path', $newMp, 'Machine')
+                    Write-Log '  Removed nvm/nodejs from machine PATH.' 'OK'
+                }
+                Write-Log '  Removed nvm-windows machine-wide install.' 'OK'
+                $removed = $true
             } elseif ($pkg.Name -like '*Terraform*') {
-                # Terraform is zip-to-path — no registry entry; force-remove directory.
                 $tfDir = 'C:\Program Files\Terraform'
                 if (Test-Path $tfDir) {
                     Remove-Item $tfDir -Recurse -Force -ErrorAction SilentlyContinue
                     Write-Log '  Force removed Terraform directory.' 'OK'
                     $removed = $true
+                }
+            } else {
+                # MSI/EXE bundled installers — use registry uninstall entry.
+                # PowerShell 7 display name is "PowerShell 7-x64"; pattern "*PowerShell 7*" covers it.
+                Write-Log "  Bundled install — trying registry uninstaller for '$($pkg.Name)'…" 'DIAG'
+                $removed = Invoke-RegistryUninstall -DisplayNamePattern "*$($pkg.Name)*"
+                if ($removed) {
+                    Write-Log "  Registry uninstall OK: $($pkg.Name)" 'OK'
                 }
             }
         }
