@@ -31,10 +31,10 @@ try {
 
     # Start-Process avoids the pipeline-hang that occurs when Start-Job worker processes
     # spawned by Configure-ExistingProfiles hold stdout handles open after Deploy exits.
-    $procArgs = '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', "`"$tmp`""
+    $procArgs = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $tmp)
     $proc = Start-Process `
         -FilePath "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" `
-        -ArgumentList ($procArgs -join ' ') `
+        -ArgumentList $procArgs `
         -RedirectStandardOutput $DeployOut `
         -RedirectStandardError  $DeployErr `
         -NoNewWindow -PassThru
