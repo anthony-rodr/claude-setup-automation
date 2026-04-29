@@ -1,11 +1,11 @@
 $ErrorActionPreference = 'Stop'
-$Root      = 'C:\ProgramData\MasterElectronics'
-$LogDir    = Join-Path $Root 'Logs'
-$tmp       = Join-Path $env:TEMP 'Deploy-DevEnvironment.ps1'
+$Root   = 'C:\ProgramData\MasterElectronics'
+$LogDir = Join-Path $Root 'Logs'
 
 New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
 
 $stamp     = Get-Date -Format 'yyyyMMdd-HHmmss'
+$tmp       = Join-Path $LogDir 'Deploy-DevEnvironment.ps1'
 $NinjaLog  = Join-Path $LogDir "ninja-deploy-$stamp.log"
 $DeployOut = Join-Path $LogDir "deploy-output-$stamp.log"
 
