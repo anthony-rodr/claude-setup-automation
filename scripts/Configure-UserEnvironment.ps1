@@ -306,18 +306,26 @@ function New-AppShortcuts {
     $publicClaudeLnk = 'C:\Users\Public\Desktop\Claude.lnk'
     if (-not (Test-Path $publicClaudeLnk)) {
         try {
-            $claudePkg = Get-AppxPackage -AllUsers -Name '*Claude*' -ErrorAction SilentlyContinue |
-                         Select-Object -First 1
-            $claudeExe = if ($claudePkg) { Join-Path $claudePkg.InstallLocation 'Claude.exe' } else { $null }
+            # Get-AppxPackage -AllUsers returns nothing until a user has logged in
+            # (provisioned packages are staged, not instantiated). Search WindowsApps directly.
+            $claudeExe = Get-ChildItem 'C:\Program Files\WindowsApps' -Filter 'Claude.exe' -Recurse -ErrorAction SilentlyContinue |
+                         Where-Object { $_.FullName -notlike '*\Temp\*' } |
+                         Select-Object -First 1 |
+                         ForEach-Object { $_.FullName }
+            if (-not $claudeExe) {
+                # Fallback to AppxPackage in case a user is already logged in
+                $claudePkg = Get-AppxPackage -AllUsers -Name '*Claude*' -ErrorAction SilentlyContinue | Select-Object -First 1
+                if ($claudePkg) { $claudeExe = Join-Path $claudePkg.InstallLocation 'Claude.exe' }
+            }
             if ($claudeExe -and (Test-Path $claudeExe)) {
                 $lnk                  = $wsh.CreateShortcut($publicClaudeLnk)
                 $lnk.TargetPath       = $claudeExe
-                $lnk.WorkingDirectory = $claudePkg.InstallLocation
+                $lnk.WorkingDirectory = Split-Path $claudeExe -Parent
                 $lnk.Description      = 'Claude'
                 $lnk.Save()
                 Write-Log '  Public desktop shortcut created: Claude' 'OK'
             } else {
-                Write-Log '  Claude Desktop AppX package not found - public shortcut skipped.' 'WARN'
+                Write-Log '  Claude Desktop not found in WindowsApps - public shortcut skipped.' 'WARN'
             }
         } catch {
             Write-Log "  Failed to create Claude public desktop shortcut: $_" 'WARN'
@@ -458,15 +466,27 @@ if (-not (Test-Path $UserProfile)) {
 Set-ClaudeSettings
 Set-UserPath
 New-AppShortcuts
-Install-VsCodeExtensions
+
+# VS Code extensions only work reliably when running as the actual user.
+# VS Code 1.75+ changed its CLI architecture so --user-data-dir no longer
+# works for extension installs from SYSTEM sessions (hash-path error).
+# Skip here and let the logon task install them in the user's own session.
+if ($runningAsUser) {
+    Install-VsCodeExtensions
+} else {
+    Write-Log 'Skipping VS Code extensions (running as SYSTEM). Logon task will install them.' 'DIAG'
+}
 
 Show-VerificationReport
 
-# Write marker so the logon task exits immediately on subsequent logins.
-# Extensions are now installed during the SYSTEM run (via --user-data-dir), so
-# the marker is written regardless of which account ran this script.
-Initialize-Dir (Join-Path $UserProfile '.claude')
-Set-Content $MarkerFile -Value (Get-Date -Format 'o') -Encoding UTF8
-Write-Log 'Configuration complete. Marker file written.' 'OK'
+# Only write the marker when running as the actual user so the logon task
+# still fires and installs VS Code extensions on first login.
+if ($runningAsUser) {
+    Initialize-Dir (Join-Path $UserProfile '.claude')
+    Set-Content $MarkerFile -Value (Get-Date -Format 'o') -Encoding UTF8
+    Write-Log 'Configuration complete. Marker file written.' 'OK'
+} else {
+    Write-Log 'SYSTEM pre-configuration complete. Logon task will finish VS Code extensions.' 'OK'
+}
 
 exit 0

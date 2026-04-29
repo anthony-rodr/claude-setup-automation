@@ -722,6 +722,27 @@ function Install-ViaDirectDownload {
 
             if ($wslOk -and $vmpOk) {
                 Write-Log '  WSL features enabled. Reboot required before WSL can be used.' 'OK'
+
+                # DISM enables the Windows feature but not the WSL2 kernel package.
+                # Without the kernel, Windows shows a first-run setup wizard on each
+                # login. Register a one-shot startup task as SYSTEM to run
+                # wsl --update + wsl --set-default-version 2 after the reboot.
+                try {
+                    $wslTaskName = 'MasterElectronics-WSLPostReboot'
+                    $wslCmd = 'wsl.exe --update --web-download; wsl.exe --set-default-version 2; ' +
+                              "Unregister-ScheduledTask -TaskName '$wslTaskName' -Confirm:`$false -ErrorAction SilentlyContinue"
+                    $wslAction   = New-ScheduledTaskAction -Execute 'powershell.exe' `
+                        -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -Command `"$wslCmd`""
+                    $wslTrigger  = New-ScheduledTaskTrigger -AtStartup
+                    $wslSettings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 10) -StartWhenAvailable
+                    $wslPrincipal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -RunLevel Highest
+                    Register-ScheduledTask -TaskName $wslTaskName -Action $wslAction -Trigger $wslTrigger `
+                        -Settings $wslSettings -Principal $wslPrincipal -Force | Out-Null
+                    Write-Log '  WSL post-reboot kernel task registered (runs once at next startup).' 'OK'
+                } catch {
+                    Write-Log "  Could not register WSL post-reboot task: $_" 'WARN'
+                }
+
                 return $true
             }
 
