@@ -6,22 +6,36 @@ Scripts are deployed via **NinjaOne RMM** and run on **remote employee machines 
 This is NOT run on the dev machine. Never confuse the two.
 
 ## Machines involved
-- **Dev machine** (adm_arodriguez, C:\projects\claude-setup-automation): write code, build zip, push to GitHub only
+- **Dev machine** (adm_arodriguez, C:\projects\claude-setup-automation): primary dev machine; SSH key at `C:\Users\adm_arodriguez\.ssh\id_ed25519`; HTTPS push broken (libcurl DLL conflict from Docker/AWS CLI) — use SSH only
+- **Second machine** (zombi, C:\repo\claude-setup-automation): also used for development; SSH key at `C:\Users\zombi\.ssh\id_ed25519` added to anthony-rodr GitHub account; push via SSH to `git@github.com:anthony-rodr/claude-setup-automation.git`
 - **Test/target machines**: separate remote computers where the installer actually runs as SYSTEM via NinjaOne
 
+## Deployment architecture (3 tiers)
+
+```
+NinjaOne bootstrap script (stored in NinjaOne)
+  └── downloads Deploy-DevEnvironment.ps1 from GitHub → executes it → streams logs to NinjaOne
+
+Deploy-DevEnvironment.ps1 (in GitHub repo, downloaded fresh each run)
+  └── downloads claude-setup-automation.zip from GitHub release → extracts → runs Install-DevEnvironment.ps1
+
+Install-DevEnvironment.ps1 (inside the zip)
+  └── installs all tools, configures users, writes manifest/logs
+```
+
+- **NinjaOne bootstrap** — small launcher script stored in NinjaOne. Pulls the latest `Deploy-DevEnvironment.ps1` from GitHub on every run. Never needs manual updating unless the bootstrap logic itself changes.
+- **Deploy-DevEnvironment.ps1** — always pulled fresh from GitHub by the bootstrap. Detects new zip via VERSIONS.md staleness check before downloading.
+- **Install-DevEnvironment.ps1** — lives inside the zip. Updated by uploading a new zip to the GitHub release.
+
 ## Deployment workflow
-1. Run `scripts/Package-Release.ps1` on the DEV machine — downloads bundled installers into `bundled/`, builds `claude-setup-automation.zip`
+1. Make changes to scripts, commit, push to GitHub
+2. Run `scripts/Package-Release.ps1` — downloads bundled installers into `bundled/`, runs syntax check, builds `claude-setup-automation.zip`
    - Re-runs are fast: already-present files in `bundled/` are skipped (delete a file to force refresh)
-   - **Fails** if any of the 8 required bundle files are missing (added session 10)
-   - **Also stamps** `Deploy-DevEnvironment.ps1` and `Rollback-DevEnvironment.ps1` in-place with `git rev-parse --short HEAD`
-   - After copying stamped scripts to NinjaOne, restore placeholders: `git checkout -- scripts/Deploy-DevEnvironment.ps1 scripts/Rollback-DevEnvironment.ps1`
-2. Commit changes and upload zip + VERSIONS.md to GitHub release:
-   - Push via SSH only (HTTPS broken — libcurl DLL conflict from Docker/AWS CLI)
-   - Remote: `git@github.com:anthony-rodr/claude-setup-automation.git`
-   - SSH key: `C:\Users\adm_arodriguez\.ssh\id_ed25519`
-   - Upload: `gh release upload v1.0 claude-setup-automation.zip VERSIONS.md --clobber`
-3. NinjaOne runs `Deploy-DevEnvironment.ps1` on target machines — pulls zip from GitHub, extracts, runs installer as SYSTEM
-4. **Deploy-DevEnvironment.ps1 and Rollback-DevEnvironment.ps1 are stored directly in NinjaOne** — must be updated there manually when changed
+   - Fails if any of the 8 required bundle files are missing
+   - Stamps `Deploy-DevEnvironment.ps1` and `Rollback-DevEnvironment.ps1` in-place with git hash (informational only — restore after: `git checkout -- scripts/Deploy-DevEnvironment.ps1 scripts/Rollback-DevEnvironment.ps1`)
+3. Upload zip + VERSIONS.md to GitHub release:
+   - `gh release upload v1.0 claude-setup-automation.zip VERSIONS.md --clobber`
+4. Run the NinjaOne automation on target machines — bootstrap pulls latest Deploy from GitHub, Deploy detects new VERSIONS.md and downloads new zip, Install runs
 
 **NinjaOne deploy URL:**
 `https://github.com/anthony-rodr/claude-setup-automation/releases/latest/download/claude-setup-automation.zip`
