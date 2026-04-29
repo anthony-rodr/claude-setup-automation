@@ -28,11 +28,21 @@ try {
 
     $startTime = Get-Date
 
-    # Redirect all output to file — avoids NinjaOne output buffer overflow on long runs
-    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $tmp *>&1 |
-        Out-File $DeployOut -Encoding UTF8
-
-    $exitCode = $LASTEXITCODE
+    # Start-Process avoids the pipeline-hang that occurs when Start-Job worker processes
+    # spawned by Configure-ExistingProfiles hold stdout handles open after Deploy exits.
+    $proc = Start-Process -FilePath 'powershell.exe' `
+        -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$tmp`"") `
+        -RedirectStandardOutput $DeployOut `
+        -NoNewWindow -PassThru
+    $completed = $proc.WaitForExit(90 * 60 * 1000)
+    if ($completed) { $proc.WaitForExit() }  # flush exit code on PS 5.1
+    if (-not $completed) {
+        try { $proc.Kill() } catch {}
+        Write-NinjaLog 'Deploy timed out after 90 minutes and was killed.'
+        exit 1
+    }
+    $exitCode = $proc.ExitCode
+    if ($null -eq $exitCode) { $exitCode = 0 }
     $duration = (Get-Date) - $startTime
     Write-NinjaLog ("Install finished in {0}m {1}s. Exit code: {2}" -f [int]$duration.TotalMinutes, $duration.Seconds, $exitCode)
 
