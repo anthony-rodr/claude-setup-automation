@@ -25,7 +25,7 @@ try {
     $hasMutex = $mutex.WaitOne(0)
     if (-not $hasMutex) {
         Write-NinjaLog 'Another Master Electronics Dev Environment install is already running. Exiting.'
-        exit 1618
+        exit 0
     }
 
 try {
