@@ -29,7 +29,8 @@ param(
 )
 
 $ErrorActionPreference = 'Continue'   # Non-fatal - log and keep going
-$MarkerFile = Join-Path $UserProfile '.claude\.devsetup-configured'
+$coreMarker = Join-Path $UserProfile '.claude\.devsetup-core-configured'
+$extMarker  = Join-Path $UserProfile '.claude\.devsetup-vscode-extensions-configured'
 
 # -----------------------------------------------------------------------------
 # Logging (appends to shared log so IT can read one file)
@@ -344,22 +345,20 @@ function New-AppShortcuts {
 #    VS Code resolve the data directory normally.
 # -----------------------------------------------------------------------------
 function Install-VsCodeExtensions {
-    $codeExe = Get-Command code -ErrorAction SilentlyContinue
+    $candidates = @(
+        'C:\Program Files\Microsoft VS Code\bin\code.cmd',
+        (Join-Path $UserProfile 'AppData\Local\Programs\Microsoft VS Code\bin\code.cmd')
+    )
+    $codeExe = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
     if (-not $codeExe) {
-        # Try common install paths - machine-wide install goes to Program Files
-        $candidates = @(
-            'C:\Program Files\Microsoft VS Code\bin\code.cmd',
-            (Join-Path $UserProfile 'AppData\Local\Programs\Microsoft VS Code\bin\code.cmd')
-        )
-        $codePath = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
-        if (-not $codePath) {
-            Write-Log 'VS Code not found - skipping extension install.' 'WARN'
-            return
-        }
-        $codeExe = $codePath
-    } else {
-        $codeExe = $codeExe.Source
+        $cmd = Get-Command code.cmd -ErrorAction SilentlyContinue
+        if ($cmd) { $codeExe = $cmd.Source }
     }
+    if (-not $codeExe) {
+        Write-Log 'VS Code CLI not found - skipping extension install.' 'WARN'
+        return
+    }
+    Write-Log "Using VS Code CLI: $codeExe" 'DIAG'
 
     $extListFile = Join-Path $SetupDir 'vscode-extensions.json'
     if (-not (Test-Path $extListFile)) {
@@ -368,22 +367,10 @@ function Install-VsCodeExtensions {
     }
     $extensions = Get-Content $extListFile | ConvertFrom-Json
 
-    # Build base args: when running as SYSTEM, pin VS Code to the target user's
-    # data directory so extensions land in the right place.
-    $baseArgs = if ($runningAsUser) {
-        @()
-    } else {
-        $userDataDir  = Join-Path $UserProfile 'AppData\Roaming\Code'
-        $extDir       = Join-Path $UserProfile '.vscode\extensions'
-        Initialize-Dir $userDataDir
-        Initialize-Dir $extDir
-        @('--user-data-dir', $userDataDir, '--extensions-dir', $extDir)
-    }
-
     foreach ($ext in $extensions) {
         Write-Log "  Installing VS Code extension: $ext" 'DIAG'
         try {
-            $out    = & $codeExe @baseArgs --install-extension $ext --force 2>&1
+            $out    = & $codeExe --install-extension $ext --force 2>&1
             $outStr = ($out -join ' ').Trim()
             if ($LASTEXITCODE -eq 0) {
                 Write-Log "  Extension OK: $ext" 'OK'
@@ -452,41 +439,38 @@ function Show-VerificationReport {
 # Main
 # -----------------------------------------------------------------------------
 
-# Skip if already fully configured (avoids running on every logon after first-time setup)
-if (Test-Path $MarkerFile) {
-    Write-Log 'Already configured (marker file present). Run completed.' 'DIAG'
-    exit 0
-}
-
 if (-not (Test-Path $UserProfile)) {
     Write-Log "User profile path '$UserProfile' does not exist - aborting." 'FAIL'
     exit 1
 }
 
-Set-ClaudeSettings
-Set-UserPath
-New-AppShortcuts
+if (-not (Test-Path $coreMarker)) {
+    Set-ClaudeSettings
+    Set-UserPath
+    New-AppShortcuts
 
-# VS Code extensions only work reliably when running as the actual user.
-# VS Code 1.75+ changed its CLI architecture so --user-data-dir no longer
-# works for extension installs from SYSTEM sessions (hash-path error).
-# Skip here and let the logon task install them in the user's own session.
-if ($runningAsUser) {
-    Install-VsCodeExtensions
+    Initialize-Dir (Join-Path $UserProfile '.claude')
+    Set-Content $coreMarker -Value (Get-Date -Format 'o') -Encoding UTF8
+    Write-Log 'Core configuration complete. Core marker written.' 'OK'
 } else {
-    Write-Log 'Skipping VS Code extensions (running as SYSTEM). Logon task will install them.' 'DIAG'
+    Write-Log 'Core configuration already complete.' 'DIAG'
+}
+
+if ($SkipVsCodeExtensions) {
+    Write-Log 'Skipping VS Code extensions (-SkipVsCodeExtensions set).' 'DIAG'
+} elseif (-not $runningAsUser) {
+    Write-Log 'Skipping VS Code extensions (not running as target user session).' 'DIAG'
+} elseif (Test-Path $extMarker) {
+    Write-Log 'VS Code extensions already configured.' 'DIAG'
+} else {
+    Install-VsCodeExtensions
+
+    Initialize-Dir (Join-Path $UserProfile '.claude')
+    Set-Content $extMarker -Value (Get-Date -Format 'o') -Encoding UTF8
+    Write-Log 'VS Code extensions configured. Extension marker written.' 'OK'
 }
 
 Show-VerificationReport
-
-# Only write the marker when running as the actual user so the logon task
-# still fires and installs VS Code extensions on first login.
-if ($runningAsUser) {
-    Initialize-Dir (Join-Path $UserProfile '.claude')
-    Set-Content $MarkerFile -Value (Get-Date -Format 'o') -Encoding UTF8
-    Write-Log 'Configuration complete. Marker file written.' 'OK'
-} else {
-    Write-Log 'SYSTEM pre-configuration complete. Logon task will finish VS Code extensions.' 'OK'
-}
+Write-Log 'Configuration run complete.' 'OK'
 
 exit 0
