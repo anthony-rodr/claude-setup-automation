@@ -8,6 +8,7 @@ $stamp     = Get-Date -Format 'yyyyMMdd-HHmmss'
 $tmp       = Join-Path $LogDir 'Deploy-DevEnvironment.ps1'
 $NinjaLog  = Join-Path $LogDir "ninja-deploy-$stamp.log"
 $DeployOut = Join-Path $LogDir "deploy-output-$stamp.log"
+$DeployErr = Join-Path $LogDir "deploy-error-$stamp.log"
 
 function Write-NinjaLog {
     param([string]$Message)
@@ -30,9 +31,12 @@ try {
 
     # Start-Process avoids the pipeline-hang that occurs when Start-Job worker processes
     # spawned by Configure-ExistingProfiles hold stdout handles open after Deploy exits.
-    $proc = Start-Process -FilePath 'powershell.exe' `
-        -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$tmp`"") `
+    $procArgs = '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', "`"$tmp`""
+    $proc = Start-Process `
+        -FilePath "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" `
+        -ArgumentList ($procArgs -join ' ') `
         -RedirectStandardOutput $DeployOut `
+        -RedirectStandardError  $DeployErr `
         -NoNewWindow -PassThru
     $completed = $proc.WaitForExit(90 * 60 * 1000)
     if ($completed) { $proc.WaitForExit() }  # flush exit code on PS 5.1
@@ -70,8 +74,23 @@ try {
         Write-NinjaLog "WARNING: install.log not found at $installLog"
     }
 
-    Write-NinjaLog "Full install log : $installLog"
-    Write-NinjaLog "Full deploy output: $DeployOut"
+    if (Test-Path $DeployErr) {
+        $errTail = @(Get-Content $DeployErr -Tail 20 -ErrorAction SilentlyContinue)
+        if ($errTail.Count -gt 0) {
+            Write-Host ''
+            Write-Host '========== STDERR TAIL ================'
+            $errTail | ForEach-Object { Write-Host $_ }
+            Write-Host '======================================='
+        }
+    }
+
+    Write-NinjaLog "Full install log   : $installLog"
+    Write-NinjaLog "Full deploy output : $DeployOut"
+    Write-NinjaLog "Full deploy errors : $DeployErr"
+    Write-NinjaLog "Bootstrap exiting with code $exitCode"
+
+    [Console]::Out.Flush()
+    [Console]::Error.Flush()
 
     exit $exitCode
 
@@ -79,5 +98,7 @@ try {
     Write-NinjaLog "Bootstrap failed: $($_.Exception.Message)"
     Write-Host ''
     if (Test-Path $NinjaLog) { Get-Content $NinjaLog -Tail 40 }
+    [Console]::Out.Flush()
+    [Console]::Error.Flush()
     exit 1
 }
