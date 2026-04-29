@@ -1,11 +1,11 @@
 ﻿# Bundled Installer Versions
 
-Built: 2026-04-29 01:57:30 UTC
-Commit: af47c66
+Built: 2026-04-29 04:00:45 UTC
+Commit: 836cb15
 
 | Package | Version | File | Size |
 |---------|---------|------|------|
-| VS Code | 1.116.0                                            | ME_Visual_Studio_Code.exe | 150.9 MB |
+| VS Code | 1.117.0                                            | ME_Visual_Studio_Code.exe | 150.9 MB |
 | Git for Windows | v2.54.0.windows.1 | ME_Git_for_Windows.exe | 62.2 MB |
 | AWS CLI v2 | latest | ME_AWS_CLI_v2.msi | 45.5 MB |
 | Python 3.12 | 3.12.10-fallback | ME_Python_3_12.exe | 25.7 MB |
