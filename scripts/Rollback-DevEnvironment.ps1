@@ -597,6 +597,19 @@ if (Get-Command claude -ErrorAction SilentlyContinue) {
 # Registry pass — catches Claude Code registered as a Windows app (e.g. standalone installer)
 Invoke-RegistryUninstall -DisplayNamePattern '*Claude Code*' | Out-Null
 
+# Unconditionally remove Claude Code files from the machine-wide npm prefix.
+# Runs even when claude was not on PATH (e.g. nvm/Node failed, so npm prefix was never added).
+$npmPrefixDir = 'C:\ProgramData\npm'
+if (Test-Path $npmPrefixDir) {
+    Get-ChildItem $npmPrefixDir -Filter 'claude*' -ErrorAction SilentlyContinue |
+        Remove-Item -Force -ErrorAction SilentlyContinue
+    $ccPkgDir = Join-Path $npmPrefixDir 'node_modules\@anthropic-ai\claude-code'
+    if (Test-Path $ccPkgDir) {
+        Remove-Item $ccPkgDir -Recurse -Force -ErrorAction SilentlyContinue
+        Write-Log '  Removed @anthropic-ai/claude-code from node_modules (force cleanup).' 'OK'
+    }
+}
+
 } # end if (-not $ForceCleanup)
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -636,7 +649,8 @@ foreach ($profDir in $userProfiles) {
         }
     }
 
-    # Remove .npmrc — strip our prefix line; delete file if nothing else remains
+    # Remove .npmrc — legacy: Configure-UserEnvironment.ps1 no longer creates per-user .npmrc
+    # (machine-wide prefix is now set via HKLM only). Keep this block so older deployments clean up.
     $npmRc = Join-Path $prof '.npmrc'
     if (Test-Path $npmRc) {
         $content = Get-Content $npmRc -Raw
@@ -691,7 +705,7 @@ foreach ($profDir in $userProfiles) {
     }
 
     # Remove all desktop shortcuts we created
-    foreach ($lnkName in @('Developer Setup Guide', 'Visual Studio Code', 'Git Bash')) {
+    foreach ($lnkName in @('Visual Studio Code', 'Git Bash')) {
         $lnk = Join-Path $prof "Desktop\$lnkName.lnk"
         if (Test-Path $lnk) {
             Remove-Item $lnk -Force -ErrorAction SilentlyContinue
@@ -699,7 +713,8 @@ foreach ($profDir in $userProfiles) {
         }
     }
 
-    # Remove per-user npm global directory (created by Configure-UserEnvironment.ps1)
+    # Remove per-user npm global directory — legacy: Configure-UserEnvironment.ps1 no longer sets a
+    # per-user prefix (machine-wide C:\ProgramData\npm is used instead). Keep for older deployments.
     $npmGlobalDir = Join-Path $prof 'AppData\Roaming\npm'
     if (Test-Path $npmGlobalDir) {
         try {
@@ -710,7 +725,8 @@ foreach ($profDir in $userProfiles) {
         }
     }
 
-    # Remove npm global from user PATH registry (load hive)
+    # Remove npm global from user PATH registry — legacy: newer installs don't add per-user npm to PATH.
+    # Keep for older deployments that may still have it.
     $npmGlobal  = Join-Path $prof 'AppData\Roaming\npm'
     $hivePath   = Join-Path $prof 'NTUSER.DAT'
     $hiveKey    = "HKU\METemp_$uname"
@@ -1097,7 +1113,8 @@ if (Test-Path $SetupDir) {
     }
 }
 
-# Remove the Anthropic API key stored as a machine env var by Deploy-SetupChatbot
+# Remove ANTHROPIC_API_KEY — legacy: chatbot (Deploy-SetupChatbot) was removed in session 10.
+# Keep this block so machines that ran an older deployment still get cleaned up.
 $apiKey = [System.Environment]::GetEnvironmentVariable('ANTHROPIC_API_KEY', 'Machine')
 if ($apiKey) {
     [System.Environment]::SetEnvironmentVariable('ANTHROPIC_API_KEY', $null, 'Machine')
@@ -1109,7 +1126,7 @@ if ($apiKey) {
 # ─────────────────────────────────────────────────────────────────────────────
 Write-Log '' 'INFO'
 Write-Log '=== Removing Public Desktop shortcuts ===' 'INFO'
-foreach ($lnkName in @('Visual Studio Code', 'Git Bash', 'Developer Setup Guide', 'Claude')) {
+foreach ($lnkName in @('Visual Studio Code', 'Git Bash', 'Claude')) {
     $lnk = "C:\Users\Public\Desktop\$lnkName.lnk"
     if (Test-Path $lnk) {
         Remove-Item $lnk -Force -ErrorAction SilentlyContinue
