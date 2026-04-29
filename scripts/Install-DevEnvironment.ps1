@@ -877,6 +877,32 @@ proxy: none
     Update-SessionPath
 }
 
+function Repair-NodeSymlink {
+    $installedNode = Get-ChildItem $NvmHome -Directory -ErrorAction SilentlyContinue |
+        Where-Object { Test-Path (Join-Path $_.FullName 'node.exe') } |
+        Sort-Object Name -Descending |
+        Select-Object -First 1
+
+    if (-not $installedNode) {
+        Add-InstallError "Node was not found inside $NvmHome after nvm install."
+        return $false
+    }
+
+    if (Test-Path $NvmSymlink) {
+        Remove-Item $NvmSymlink -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    cmd.exe /c "mklink /J `"$NvmSymlink`" `"$($installedNode.FullName)`"" | Out-Null
+
+    if (-not (Test-Path (Join-Path $NvmSymlink 'node.exe'))) {
+        Add-InstallError "Failed to create Node junction from $NvmSymlink to $($installedNode.FullName)."
+        return $false
+    }
+
+    Write-Log "Node junction repaired: $NvmSymlink -> $($installedNode.FullName)" 'OK'
+    return $true
+}
+
 function Test-NvmRequired {
     $nvmExe = Join-Path $NvmHome 'nvm.exe'
     if (-not (Test-Path $nvmExe)) {
@@ -923,6 +949,17 @@ function Install-NodeThroughNvm {
         return $false
     }
 
+    # If the symlink target exists as a plain directory (not a junction), nvm cannot
+    # create the junction over it and will silently report success without placing node.exe.
+    # Remove the plain directory so nvm use can create the junction cleanly.
+    if (Test-Path $NvmSymlink) {
+        $symlinkItem = Get-Item $NvmSymlink -ErrorAction SilentlyContinue
+        if ($symlinkItem -and $symlinkItem.LinkType -ne 'Junction') {
+            Write-Log "$NvmSymlink exists as a plain directory (not a junction) - removing so nvm can create junction." 'DIAG'
+            Remove-Item $NvmSymlink -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
     # Prefer explicit version number over the 'lts' alias - nvm use with an alias
     # can fail silently on machines where the alias lookup also fails.
     $useArg = if ($nodeVersion) { $nodeVersion } else { 'lts' }
@@ -938,13 +975,16 @@ function Install-NodeThroughNvm {
     Update-SessionPath
     Add-MachinePath $NvmSymlink
 
-    $nodeExe = Join-Path $NvmSymlink 'node.exe'
-    $npmCmd  = Join-Path $NvmSymlink 'npm.cmd'
-
-    if (-not (Test-Path $nodeExe)) {
-        Add-InstallError "nvm completed but node.exe was not found at $nodeExe."
+    # Explicitly rebuild the junction after nvm use. nvm silently prints "Now using
+    # node" but may not create the junction if $NvmSymlink existed as any kind of
+    # directory. Repair-NodeSymlink scans $NvmHome for the actual node.exe and calls
+    # mklink /J directly, guaranteeing the junction is correct.
+    if (-not (Repair-NodeSymlink)) {
         return $false
     }
+
+    $nodeExe = Join-Path $NvmSymlink 'node.exe'
+    $npmCmd  = Join-Path $NvmSymlink 'npm.cmd'
 
     if (-not (Test-Path $npmCmd)) {
         Add-InstallError "nvm completed but npm.cmd was not found at $npmCmd."
