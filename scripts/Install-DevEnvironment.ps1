@@ -1400,7 +1400,7 @@ function Configure-ExistingProfiles {
             $job = Start-Job -ScriptBlock {
                 param($script, $profilePath, $setupDir)
                 & powershell.exe -NonInteractive -NoProfile -ExecutionPolicy Bypass `
-                    -File $script -UserProfile $profilePath -SetupDir $setupDir -SkipVsCodeExtensions 2>&1
+                    -File $script -UserProfile $profilePath -SetupDir $setupDir 2>&1
             } -ArgumentList $ConfigScript, $prof, $SetupDir
 
             $running.Add([pscustomobject]@{
@@ -1427,7 +1427,7 @@ function Configure-ExistingProfiles {
                 }
 
                 Remove-Job $item.Job -Force -ErrorAction SilentlyContinue
-                $running.Remove($item)
+                [void]$running.Remove($item)
                 continue
             }
 
@@ -1440,7 +1440,7 @@ function Configure-ExistingProfiles {
                     }
                 } catch { }
                 Remove-Job $item.Job -Force -ErrorAction SilentlyContinue
-                $running.Remove($item)
+                [void]$running.Remove($item)
                 Add-InstallWarning "User configuration timed out for $($item.Name)."
             }
         }

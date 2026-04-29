@@ -159,7 +159,7 @@ After extraction, Deploy verifies required files are present before launching th
 - Run 7 (2026-04-28): **NinjaOne Automation script** — `powershell-core` choco hung 52 min (user killed, exit -1); TEMP dir missing caused nvm + Node.js MSI + Python bundled EXE (1622) to fail; PowerShell 7 NOT FOUND (ghost Choco registration); 11/14 pass. Logs at `C:\projects\logs\`
 - Run 11 (2026-04-29): **11/12** — Python NOT FOUND; root cause: bundled EXE returned null exit code (PS 5.1 bug), fell through to Choco which hit 1603 because bundled EXE had already registered the MSI product code
 - Run 12 (2026-04-29): **11/12** — Python NOT FOUND again (same root cause); VS Code extensions confirmed working
-- Run 13 (2026-04-29): in progress — null exit code fix deployed (commit ec71501)
+- Run 13 (2026-04-29): **12/12, 0 failures, 5m 31s** — null exit code fix confirmed; all bundled EXEs hit WARN+OK; Python installed clean; Node v24.15.0 from bundled fallback (nvm network blocked); Claude Code 2.1.123; all 9 user profiles configured OK
 
 ## Session 9 changes (2026-04-28)
 ### Root causes diagnosed from Run 7 logs
@@ -249,9 +249,8 @@ Bundled EXEs will log `[WARN] Invoke-Process: null exit code — treating as 0` 
 - Keeper login works (Zscaler CA appended to `C:\Python314\Lib\site-packages\certifi\cacert.pem`)
 - Keeper uses SSO — non-interactive access requires KSM (not licensed yet)
 
-## Next steps (as of 2026-04-29 session 12)
-1. **Run 13** — rollback + reboot + deploy; look for `[WARN] Invoke-Process: null exit code` + `[OK] Direct install OK: Python 3.12`
-2. **Diagnose NinjaOne "still processing"** — check `C:\ProgramData\MasterElectronics\Logs\ninja-deploy-*.log` last line; if "Bootstrap exiting with code X" is present, issue is NinjaOne UI/timing not process hang
-3. **Update CLAUDE.md** with Run 13 results
-4. Fix Python rollback: use bundled `ME_Python_3_12.exe /quiet /uninstall`
-5. Request KSM licensing from Keeper admin
+## Next steps (as of 2026-04-29 session 13)
+1. **Diagnose NinjaOne "still processing"** — check `C:\ProgramData\MasterElectronics\Logs\ninja-deploy-*.log` last line; if "Bootstrap exiting with code X" is present, issue is NinjaOne UI/timing not process hang
+2. Fix Python rollback: use bundled `ME_Python_3_12.exe /quiet /uninstall`
+3. Request KSM licensing from Keeper admin
+4. Consider bundling Node LTS zip (`ME_Node_LTS.zip`) in Package-Release.ps1 — nvm download is network-blocked on target machines, fallback is already working but the bundle file must be pre-staged

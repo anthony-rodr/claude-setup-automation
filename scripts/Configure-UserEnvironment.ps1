@@ -367,10 +367,19 @@ function Install-VsCodeExtensions {
     }
     $extensions = Get-Content $extListFile | ConvertFrom-Json
 
+    $extArgs = if (-not $runningAsUser) {
+        $extDir = Join-Path $UserProfile '.vscode\extensions'
+        Initialize-Dir $extDir
+        Write-Log "  Installing extensions to user dir: $extDir" 'DIAG'
+        @('--extensions-dir', $extDir)
+    } else {
+        @()
+    }
+
     foreach ($ext in $extensions) {
         Write-Log "  Installing VS Code extension: $ext" 'DIAG'
         try {
-            $out    = & $codeExe --install-extension $ext --force 2>&1
+            $out    = & $codeExe --install-extension $ext --force @extArgs 2>&1
             $outStr = ($out -join ' ').Trim()
             if ($LASTEXITCODE -eq 0) {
                 Write-Log "  Extension OK: $ext" 'OK'
@@ -458,8 +467,6 @@ if (-not (Test-Path $coreMarker)) {
 
 if ($SkipVsCodeExtensions) {
     Write-Log 'Skipping VS Code extensions (-SkipVsCodeExtensions set).' 'DIAG'
-} elseif (-not $runningAsUser) {
-    Write-Log 'Skipping VS Code extensions (not running as target user session).' 'DIAG'
 } elseif (Test-Path $extMarker) {
     Write-Log 'VS Code extensions already configured.' 'DIAG'
 } else {
