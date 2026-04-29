@@ -157,6 +157,9 @@ After extraction, Deploy verifies required files are present before launching th
 - Run 5 (2026-04-20): pip still failed — CA cert injection works but Zscaler blocks at network level; Keeper disabled
 - Run 6 (2026-04-20): **24m 43s — 12/12, 0 failures**; VS Code extensions confirmed, Claude installed; Claude public desktop shortcut missing
 - Run 7 (2026-04-28): **NinjaOne Automation script** — `powershell-core` choco hung 52 min (user killed, exit -1); TEMP dir missing caused nvm + Node.js MSI + Python bundled EXE (1622) to fail; PowerShell 7 NOT FOUND (ghost Choco registration); 11/14 pass. Logs at `C:\projects\logs\`
+- Run 11 (2026-04-29): **11/12** — Python NOT FOUND; root cause: bundled EXE returned null exit code (PS 5.1 bug), fell through to Choco which hit 1603 because bundled EXE had already registered the MSI product code
+- Run 12 (2026-04-29): **11/12** — Python NOT FOUND again (same root cause); VS Code extensions confirmed working
+- Run 13 (2026-04-29): in progress — null exit code fix deployed (commit ec71501)
 
 ## Session 9 changes (2026-04-28)
 ### Root causes diagnosed from Run 7 logs
@@ -212,11 +215,29 @@ After extraction, Deploy verifies required files are present before launching th
 - **User notifications via `msg.exe`** added to all three scripts
 - **GIT_COMMIT_HASH placeholder bug fixed**: accidentally committed as literal SHA in `001a885`
 
+## Session 11 changes (2026-04-29)
+- **Bootstrap mutex guard** — `Global\MasterElectronics-DevEnvironment-Install` prevents concurrent installs; second instance logs "already running" and exits 0
+- **Bootstrap refactored** — single try/catch/finally; `$finalExitCode` variable; `exit` only at end (commit fe974ae)
+- **Tier-2 duplicate retry fix** — direct-download tier now guards `-not (Test-Path (Get-BundledPath $Pkg))` so it doesn't retry the bundled file that already failed
+
+## Session 12 changes (2026-04-29)
+### Root cause of Python 1603 (diagnosed)
+`Invoke-Process` returns `$null` for `$p.ExitCode` on PS 5.1 for launcher-style EXEs (Python, Git, VS Code bundled installers). `$null -notin @(0,3010)` = `$true` in PowerShell → every bundled EXE was treated as failure. Python's bundled EXE actually installed successfully (~50s runtime) and registered its MSI product code. Choco then found "same version already installed" → 1603.
+
+### Code changes (commit 8cedf92 + ec71501)
+- **`Invoke-Process` null exit code fix** — `if ($null -eq $exitCode) { $exitCode = 0 }` + WARN log; same pattern as Bootstrap (commit ec71501)
+- **Python `PreInstall` hook** — clears stale `C:\Python312` / `C:\Program Files\Python312` dirs before install attempt (directory cleanup only — not MSI product DB, per ChatGPT review)
+- **`PreInstall` hook mechanism** — generic `PreInstall` scriptblock in package catalog; called in `Install-Package` after pre-checks, before install tiers
+- **AWS CLI v2 rollback pattern** — registry DisplayName is `"AWS Command Line Interface v2"`, not `"AWS CLI v2"`; fixed in both `bundled` and `choco` fallback paths of Rollback script (commit 8cedf92)
+- **MSI exit code 1641** — added to accepted codes alongside 0 and 3010 (reboot initiated by installer)
+
+### Expected behavior after fix
+Bundled EXEs will log `[WARN] Invoke-Process: null exit code — treating as 0` then `[OK] Direct install OK` instead of falling through to Choco. Python's AltPaths loop adds `C:\Program Files\Python312` to machine PATH.
+
 ## Known issues / open items
-- **PowerShell 7 not installed on test machine** — ghost Choco entry from Run 7; VerifyExe + hard verify will catch on next run
-- **nvm not installed on test machine** — stable TempDir + bundled zip fixes root cause on next run
+- **NinjaOne bootstrap "still processing"** — automation completes and install log shows success, but NinjaOne UI doesn't mark it done; root cause unknown (process tree inheritance? console handle?); need diagnostic: check ninja-deploy-*.log last line on test machine
 - **Claude Desktop rollback unverified**: MSIX removal not explicitly checked post-rollback
-- **Python rollback**: no uninstall string in registry for machine-wide Python; fix: bundled `ME_Python_3_12.exe /quiet /uninstall`
+- **Python rollback** (lower priority): bundled `ME_Python_3_12.exe /quiet /uninstall` would be cleaner than registry uninstall
 - WSL2 cannot be removed without a reboot
 - libcurl DLL conflict (from Docker/AWS CLI) breaks git HTTPS — always use SSH for pushes
 - KSM licensing needed for Keeper Commander re-enable
@@ -228,9 +249,9 @@ After extraction, Deploy verifies required files are present before launching th
 - Keeper login works (Zscaler CA appended to `C:\Python314\Lib\site-packages\certifi\cacert.pem`)
 - Keeper uses SSO — non-interactive access requires KSM (not licensed yet)
 
-## Next steps (as of 2026-04-28 session 11)
-1. **Rebuild zip** — run `Package-Release.ps1` + upload to GitHub release
-2. **Update NinjaOne** — copy stamped Deploy + Rollback scripts to NinjaOne after Package-Release runs
-3. **Re-run deployment** on test machine — should now install PowerShell 7 (bundled + VerifyExe) and nvm (bundled + stable TempDir)
+## Next steps (as of 2026-04-29 session 12)
+1. **Run 13** — rollback + reboot + deploy; look for `[WARN] Invoke-Process: null exit code` + `[OK] Direct install OK: Python 3.12`
+2. **Diagnose NinjaOne "still processing"** — check `C:\ProgramData\MasterElectronics\Logs\ninja-deploy-*.log` last line; if "Bootstrap exiting with code X" is present, issue is NinjaOne UI/timing not process hang
+3. **Update CLAUDE.md** with Run 13 results
 4. Fix Python rollback: use bundled `ME_Python_3_12.exe /quiet /uninstall`
 5. Request KSM licensing from Keeper admin
