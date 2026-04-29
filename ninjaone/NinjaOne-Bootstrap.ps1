@@ -17,6 +17,17 @@ function Write-NinjaLog {
     Write-Host $line
 }
 
+$MutexName = 'Global\MasterElectronics-DevEnvironment-Install'
+$mutex     = New-Object System.Threading.Mutex($false, $MutexName)
+$hasMutex  = $false
+
+try {
+    $hasMutex = $mutex.WaitOne(0)
+    if (-not $hasMutex) {
+        Write-NinjaLog 'Another Master Electronics Dev Environment install is already running. Exiting.'
+        exit 1618
+    }
+
 try {
     Write-NinjaLog "Bootstrap started. Computer: $env:COMPUTERNAME"
     Write-NinjaLog "Running as: $([System.Security.Principal.WindowsIdentity]::GetCurrent().Name)"
@@ -101,4 +112,9 @@ try {
     [Console]::Out.Flush()
     [Console]::Error.Flush()
     exit 1
+}
+
+} finally {
+    if ($hasMutex) { $mutex.ReleaseMutex() }
+    $mutex.Dispose()
 }
