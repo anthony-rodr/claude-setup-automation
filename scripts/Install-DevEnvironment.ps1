@@ -261,8 +261,17 @@ function Invoke-Process {
         }
     }
 
+    # $p.ExitCode can be null on PS 5.1 even after WaitForExit() for certain EXEs
+    # (launchers that spawn child processes). Treat null as 0 (success), matching
+    # the same pattern used in NinjaOne-Bootstrap.ps1.
+    $exitCode = $p.ExitCode
+    if ($null -eq $exitCode) {
+        Write-Log "  Invoke-Process: null exit code after process exit — treating as 0." 'WARN'
+        $exitCode = 0
+    }
+
     return [pscustomobject]@{
-        ExitCode = $p.ExitCode
+        ExitCode = $exitCode
         Output   = $out
         TimedOut = $false
     }
