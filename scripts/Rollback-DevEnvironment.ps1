@@ -354,7 +354,8 @@ foreach ($pkg in $packages) {
                 # entry is removed even when choco can't drive the uninstall (e.g. Python
                 # exit 1603 due to registry/file state mismatch from a prior partial install).
                 if (-not $removed) {
-                    $pattern = "*$($pkg.Name)*"
+                    # AWS CLI v2 registry DisplayName is "AWS Command Line Interface v2", not "AWS CLI v2"
+                    $pattern = if ($pkg.Name -eq 'AWS CLI v2') { '*AWS Command Line Interface*' } else { "*$($pkg.Name)*" }
                     Write-Log "  choco uninstall failed — trying registry uninstaller for '$pattern'…" 'DIAG'
                     $removed = Invoke-RegistryUninstall -DisplayNamePattern $pattern
                     if ($removed) { Write-Log "  Registry uninstall OK: $($pkg.Name)" 'OK' }
@@ -404,6 +405,10 @@ foreach ($pkg in $packages) {
                     Write-Log '  Force removed Terraform directory.' 'OK'
                     $removed = $true
                 }
+            } elseif ($pkg.Name -eq 'AWS CLI v2') {
+                # Registry DisplayName is "AWS Command Line Interface v2", not "AWS CLI v2"
+                $removed = Invoke-RegistryUninstall -DisplayNamePattern '*AWS Command Line Interface*'
+                if ($removed) { Write-Log "  Registry uninstall OK: $($pkg.Name)" 'OK' }
             } else {
                 # MSI/EXE bundled installers — use registry uninstall entry.
                 # PowerShell 7 display name is "PowerShell 7-x64"; pattern "*PowerShell 7*" covers it.

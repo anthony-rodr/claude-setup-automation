@@ -416,6 +416,16 @@ $Packages = @(
             'C:\Python312',
             'C:\Python3'
         )
+        PreInstall = {
+            # Remove stale Python directories that cause MSI error 1603 on re-install
+            # after an incomplete rollback leaves the directory behind.
+            foreach ($d in @('C:\Python312','C:\Python313','C:\Program Files\Python312','C:\Program Files\Python313')) {
+                if (Test-Path $d) {
+                    Write-Log "  Pre-install: removing stale Python directory: $d" 'DIAG'
+                    Remove-Item $d -Recurse -Force -ErrorAction SilentlyContinue
+                }
+            }
+        }
     }
     @{
         Name      = 'GitHub CLI'
@@ -1150,6 +1160,10 @@ function Install-Package {
             Save-Manifest
             return
         }
+    }
+
+    if ($Pkg.ContainsKey('PreInstall') -and $Pkg.PreInstall) {
+        try { & $Pkg.PreInstall } catch { Write-Log "  PreInstall hook error: $_" 'WARN' }
     }
 
     if ($RunningAsSystem) {
