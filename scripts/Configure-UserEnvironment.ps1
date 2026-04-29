@@ -223,7 +223,7 @@ function Set-UserPath {
 
         # Resolve registry path: try hive load first, fall back to active SID hive
         $regPath = $null
-        & reg load $hiveKey $hivePath 2>&1 | Out-Null
+        & "$env:SystemRoot\System32\reg.exe" load $hiveKey $hivePath 2>&1 | Out-Null
         if ($LASTEXITCODE -eq 0) {
             $hiveLoaded = $true
             $regPath    = "Registry::HKEY_USERS\METemp_$uname\Environment"
@@ -257,7 +257,7 @@ function Set-UserPath {
                     # PowerShell's New-Item cannot create keys under active SID hives when
                     # running as SYSTEM — produces "The parameter is incorrect" and escapes
                     # the try-catch.  reg.exe handles active hives correctly.
-                    & reg add "HKU\$sid\Environment" /f 2>&1 | Out-Null
+                    & "$env:SystemRoot\System32\reg.exe" add "HKU\$sid\Environment" /f 2>&1 | Out-Null
                     if ($LASTEXITCODE -ne 0) {
                         Write-Log "Could not create Environment key for ${uname} — skipping PATH." 'WARN'
                         return
@@ -287,7 +287,7 @@ function Set-UserPath {
             if ($hiveLoaded) {
                 [gc]::Collect()
                 [gc]::WaitForPendingFinalizers()
-                & reg unload $hiveKey 2>&1 | Out-Null
+                & "$env:SystemRoot\System32\reg.exe" unload $hiveKey 2>&1 | Out-Null
             }
         }
     }

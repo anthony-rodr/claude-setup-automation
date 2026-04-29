@@ -1,71 +1,43 @@
-﻿#Requires -RunAsAdministrator
+#Requires -RunAsAdministrator
 <#
 .SYNOPSIS
-    Silent, self-healing developer environment installer for Master Electronics.
-    Deployed via NinjaOne RMM — zero user interaction required.
+    Silent developer environment installer for Master Electronics.
 
 .DESCRIPTION
-    Three-tier install strategy per package: winget → Chocolatey → direct download.
-    Each tier self-heals before falling back (repairs winget sources, re-downloads
-    Chocolatey, diagnoses network/lock/agreement errors and retries).
-    Records every install into a manifest consumed by Rollback-DevEnvironment.ps1.
-    After machine-wide installs, configures all existing user profiles and registers
-    a scheduled task so future user accounts are configured on first logon.
+    Full developer environment deployment script intended to run from NinjaOne as SYSTEM.
 
-.PREREQUISITES
-    ── IT / Deployment ────────────────────────────────────────────────────────
-    1. Anthropic API Key (required for the setup guide chatbot)
-       - The chatbot that guides employees through post-install configuration is
-         powered by the Anthropic API. This requires ONE company-level API key.
-       - Obtain from: console.anthropic.com → API Keys → Create Key
-         (Sign in with the company's existing Anthropic/Claude billing account)
-       - Pass it to this script via: -AnthropicApiKey "sk-ant-..."
-       - The key is stored as a machine-level environment variable so every user
-         on the machine can run the chatbot — employees never need to see it.
-       - Cost: pay-per-use API calls, roughly $0.01–0.03 per setup conversation.
+    Key behaviors:
+    - Installs required tools using bundled installers, direct downloads, Chocolatey, then winget fallback.
+    - Avoids bulk Chocolatey install because it can hang under SYSTEM.
+    - Uses a stable ProgramData temp directory instead of SYSTEM profile temp.
+    - Sets execution policy to RemoteSigned so npm PowerShell shims such as claude.ps1 work.
+    - Installs nvm-windows machine-wide as a required dependency.
+    - Installs Node.js through nvm.
+    - Installs Claude Code machine-wide via npm prefix C:\ProgramData\npm.
+    - Configures existing user profiles using Configure-UserEnvironment.ps1.
+    - Registers a logon scheduled task for future users.
+    - Writes manifest.json for rollback.
+    - Writes install and verification logs.
 
-    ── Per Employee (guided by the chatbot after install) ─────────────────────
-    2. Claude Account (required for Claude Code)
-       - Each employee needs their own free Claude account at claude.ai to
-         authenticate Claude Code. This is a personal account, separate from
-         the company API key above.
-       - The setup guide chatbot walks employees through creating or signing into
-         their Claude account and completing OAuth authentication (Step 6).
-       - Employees do NOT need billing — a free claude.ai account is sufficient.
+.NOTES
+    Expected package layout when launched from the release zip:
 
-    ── Summary ────────────────────────────────────────────────────────────────
-    IT manages:  One Anthropic API key (console.anthropic.com, company account)
-    Each user:   One free Claude account (claude.ai, personal, guided by chatbot)
+        package\
+          scripts\
+            Install-DevEnvironment.ps1
+            Configure-UserEnvironment.ps1
+            packages.config
+          bundled\
+            ME_Git_for_Windows.exe
+            ME_Visual_Studio_Code.exe
+            ME_Python_3_12.exe
+            ME_GitHub_CLI.msi
+            ME_AWS_CLI_v2.msi
+            ME_Terraform.zip
 
-.PARAMETER Role
-    Which tool set to install.  Core = base tools everyone gets.
-    Dev = adds nvm/Node, Python, GitHub CLI, Docker.
-    CloudOps = adds AWS CLI, Terraform (also installs Core).
-    All = everything (default).
-
-.PARAMETER MaxRetries
-    How many times to retry each install method before trying the next tier (default 3).
-
-.PARAMETER LogPath
-    Full path to the install log file.
-
-.PARAMETER ManifestPath
-    Full path to the JSON manifest consumed by Rollback-DevEnvironment.ps1.
-
-.PARAMETER AnthropicApiKey
-    Anthropic API key used by the developer setup guide chatbot.
-    Stored as a machine-level environment variable so all users can run the chatbot.
-    IT obtains this key from the Anthropic console and passes it here.
-
-.EXAMPLE
-    # Deploy from NinjaOne as SYSTEM, install everything:
-    powershell.exe -ExecutionPolicy Bypass -File Install-DevEnvironment.ps1 `
-        -AnthropicApiKey "sk-ant-..."
-
-    # CloudOps role only:
-    powershell.exe -ExecutionPolicy Bypass -File Install-DevEnvironment.ps1 `
-        -Role CloudOps -AnthropicApiKey "sk-ant-..."
+    The setup guide chatbot has been removed from this installer.
 #>
+
 [CmdletBinding()]
 param(
     [ValidateSet('Core', 'Dev', 'CloudOps', 'All')]
@@ -75,178 +47,359 @@ param(
 
     [string]$LogPath = 'C:\ProgramData\MasterElectronics\DevSetup\install.log',
 
-    [string]$ManifestPath = 'C:\ProgramData\MasterElectronics\DevSetup\manifest.json',
-
-    # Anthropic API key for the setup guide chatbot.
-    # Pass this from NinjaOne as a secret script parameter.
-    [string]$AnthropicApiKey = ''
+    [string]$ManifestPath = 'C:\ProgramData\MasterElectronics\DevSetup\manifest.json'
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 # Constants
-# ─────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 $SetupDir     = Split-Path $ManifestPath -Parent
 $ConfigScript = Join-Path $SetupDir 'Configure-UserEnvironment.ps1'
 $ExtListFile  = Join-Path $SetupDir 'vscode-extensions.json'
 $TaskName     = 'MasterElectronics-ConfigureUserEnvironment'
+$TempDir      = Join-Path $SetupDir 'Temp'
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Deployment context
-# winget is unreliable when running as SYSTEM (NinjaOne/RMM context) due to
-# UWP/COM limitations.  Detect SYSTEM early so Install-Package can use
-# Chocolatey as Tier 1 and demote winget to last-resort.
-# ─────────────────────────────────────────────────────────────────────────────
+$NvmHome      = 'C:\ProgramData\nvm'
+$NvmSymlink   = 'C:\Program Files\nodejs'
+$NpmPrefix    = 'C:\ProgramData\npm'
+
 $RunningAsSystem = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name -match 'SYSTEM'
 
-# ─────────────────────────────────────────────────────────────────────────────
+foreach ($dir in @($SetupDir, $TempDir, (Split-Path $LogPath -Parent))) {
+    if ($dir -and -not (Test-Path $dir)) {
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    }
+}
+
+# ---------------------------------------------------------------------------
 # Logging
-# ─────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 function Write-Log {
     param(
         [string]$Msg,
         [ValidateSet('INFO','OK','WARN','FAIL','DIAG')]
         [string]$Level = 'INFO'
     )
-    $ts   = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+
+    $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
     $line = "[$ts][$Level] $Msg"
+
     Add-Content -Path $LogPath -Value $line -Encoding UTF8
+
     $color = switch ($Level) {
-        'OK'   { 'Green'  }
+        'OK'   { 'Green' }
         'WARN' { 'Yellow' }
-        'FAIL' { 'Red'    }
-        'DIAG' { 'Cyan'   }
+        'FAIL' { 'Red' }
+        'DIAG' { 'Cyan' }
         default { 'White' }
     }
+
     Write-Host $line -ForegroundColor $color
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
-# PATH refresh helper
-# Reads Machine + User PATH from registry, expands embedded %VAR% references
-# (e.g. %NVM_HOME% set by Chocolatey), and updates the current session.
-# Must also refresh non-PATH machine vars first so ExpandEnvironmentVariables
-# can resolve them.
-# ─────────────────────────────────────────────────────────────────────────────
-function Update-SessionPath {
-    # Refresh non-PATH machine env vars (ChocolateyInstall, etc.) then user env
-    # vars (NVM_HOME when nvm is installed per-user via winget) so that
-    # ExpandEnvironmentVariables can resolve %VAR% references in PATH strings.
-    foreach ($scope in 'Machine','User') {
-        $vars = [System.Environment]::GetEnvironmentVariables($scope)
-        foreach ($key in $vars.Keys) {
-            if ($key -ne 'Path') {
-                Set-Item -Path "Env:\$key" -Value $vars[$key] -ErrorAction SilentlyContinue
-            }
-        }
+# ---------------------------------------------------------------------------
+# Environment helpers
+# ---------------------------------------------------------------------------
+function Set-TlsPolicy {
+    try {
+        [Net.ServicePointManager]::SecurityProtocol =
+            [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13
+    } catch {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
     }
-    $mp = [System.Environment]::GetEnvironmentVariable('Path', 'Machine')
-    $up = [System.Environment]::GetEnvironmentVariable('Path', 'User')
-    if (-not $mp) { $mp = '' }
-    if (-not $up) { $up = '' }
-    $env:Path = ([System.Environment]::ExpandEnvironmentVariables($mp) + ';' +
-                 [System.Environment]::ExpandEnvironmentVariables($up)).TrimEnd(';')
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
+function Update-SessionPath {
+    foreach ($scope in @('Machine','User')) {
+        try {
+            $vars = [System.Environment]::GetEnvironmentVariables($scope)
+            foreach ($key in $vars.Keys) {
+                if ($key -ne 'Path') {
+                    Set-Item -Path "Env:\$key" -Value $vars[$key] -ErrorAction SilentlyContinue
+                }
+            }
+        } catch { }
+    }
+
+    $machinePath = [System.Environment]::GetEnvironmentVariable('Path', 'Machine')
+    $userPath    = [System.Environment]::GetEnvironmentVariable('Path', 'User')
+
+    if (-not $machinePath) { $machinePath = '' }
+    if (-not $userPath)    { $userPath = '' }
+
+    $env:Path = ([System.Environment]::ExpandEnvironmentVariables($machinePath) + ';' +
+                 [System.Environment]::ExpandEnvironmentVariables($userPath)).TrimEnd(';')
+}
+
+function Add-MachinePath {
+    param([Parameter(Mandatory)][string]$PathToAdd)
+
+    $machinePath = [System.Environment]::GetEnvironmentVariable('Path', 'Machine')
+    if (-not $machinePath) { $machinePath = '' }
+
+    $segments = $machinePath -split ';' | Where-Object { $_ -and $_.Trim() -ne '' }
+    $exists = $false
+
+    foreach ($segment in $segments) {
+        if ($segment.TrimEnd('\') -ieq $PathToAdd.TrimEnd('\')) {
+            $exists = $true
+            break
+        }
+    }
+
+    if (-not $exists) {
+        $newPath = ($segments + $PathToAdd) -join ';'
+        [System.Environment]::SetEnvironmentVariable('Path', $newPath, 'Machine')
+        Write-Log "Added to machine PATH: $PathToAdd" 'OK'
+    }
+
+    if ($env:Path -notlike "*$PathToAdd*") {
+        $env:Path = "$env:Path;$PathToAdd"
+    }
+
+    Update-SessionPath
+}
+
+function Set-RequiredExecutionPolicy {
+    try {
+        Set-ExecutionPolicy RemoteSigned -Scope LocalMachine -Force
+        Write-Log 'PowerShell execution policy set to RemoteSigned.' 'OK'
+    } catch {
+        Write-Log "Could not set execution policy to RemoteSigned: $_" 'WARN'
+    }
+}
+
+function Invoke-Download {
+    param(
+        [Parameter(Mandatory)][string]$Url,
+        [Parameter(Mandatory)][string]$Dest
+    )
+
+    $destDir = Split-Path $Dest -Parent
+    if ($destDir -and -not (Test-Path $destDir)) {
+        New-Item -ItemType Directory -Path $destDir -Force | Out-Null
+    }
+
+    for ($i = 1; $i -le $MaxRetries; $i++) {
+        if (Test-Path $Dest) {
+            Remove-Item $Dest -Force -ErrorAction SilentlyContinue
+        }
+
+        try {
+            Invoke-WebRequest $Url -OutFile $Dest -UseBasicParsing -ErrorAction Stop
+            if (-not (Test-Path $Dest)) {
+                throw "Downloaded file missing: $Dest"
+            }
+            return
+        } catch {
+            if ($i -eq $MaxRetries) {
+                throw
+            }
+
+            Write-Log "Download attempt $i failed ($Url). Retrying in 10 seconds." 'WARN'
+            Start-Sleep -Seconds 10
+        }
+    }
+}
+
+function Invoke-Process {
+    param(
+        [Parameter(Mandatory)][string]$FilePath,
+        [string[]]$ArgumentList = @(),
+        [int]$TimeoutSeconds = 1800,
+        [string]$Label = ''
+    )
+
+    $stdout = Join-Path $TempDir ("proc_out_{0}_{1}.txt" -f $PID, ([guid]::NewGuid().ToString('N')))
+    $stderr = Join-Path $TempDir ("proc_err_{0}_{1}.txt" -f $PID, ([guid]::NewGuid().ToString('N')))
+
+    $p = Start-Process -FilePath $FilePath `
+        -ArgumentList $ArgumentList `
+        -RedirectStandardOutput $stdout `
+        -RedirectStandardError $stderr `
+        -PassThru `
+        -NoNewWindow
+
+    $done = $p.WaitForExit($TimeoutSeconds * 1000)
+
+    if (-not $done) {
+        try { $p.Kill() } catch { }
+        Write-Log "Process timed out after $TimeoutSeconds seconds: $FilePath $($ArgumentList -join ' ')" 'WARN'
+        return [pscustomobject]@{
+            ExitCode = -1
+            Output   = ''
+            TimedOut = $true
+        }
+    }
+
+    $out = ''
+    if (Test-Path $stdout) {
+        $out += (Get-Content $stdout -Raw -ErrorAction SilentlyContinue)
+    }
+    if (Test-Path $stderr) {
+        $err = Get-Content $stderr -Raw -ErrorAction SilentlyContinue
+        if ($err) { $out += "`n$err" }
+    }
+
+    Remove-Item $stdout,$stderr -Force -ErrorAction SilentlyContinue
+
+    if ($Label -and $out) {
+        $out -split "`r?`n" | Where-Object { $_ -and $_.Trim() -ne '' } | ForEach-Object {
+            Write-Log "  [$Label] $_" 'DIAG'
+        }
+    }
+
+    return [pscustomobject]@{
+        ExitCode = $p.ExitCode
+        Output   = $out
+        TimedOut = $false
+    }
+}
+
+function Test-CommandAvailable {
+    param(
+        [Parameter(Mandatory)][string]$Command,
+        [string[]]$FallbackExes = @()
+    )
+
+    $cmd = Get-Command $Command -ErrorAction SilentlyContinue
+    if ($cmd) { return $cmd.Source }
+
+    foreach ($fb in $FallbackExes) {
+        if ($fb -and (Test-Path $fb)) { return $fb }
+    }
+
+    return $null
+}
+
+# ---------------------------------------------------------------------------
 # Manifest
-# ─────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 $Manifest = [ordered]@{
-    SchemaVersion = '1.0'
+    SchemaVersion = '1.1'
     StartTime     = (Get-Date -Format 'o')
     Role          = $Role
     Packages      = [System.Collections.Generic.List[object]]::new()
     ChocolateyInstalled = $false
     Errors        = [System.Collections.Generic.List[string]]::new()
+    Warnings      = [System.Collections.Generic.List[string]]::new()
 }
 
 function Save-Manifest {
     $Manifest | ConvertTo-Json -Depth 10 | Set-Content $ManifestPath -Encoding UTF8
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
+function Add-InstallWarning {
+    param([string]$Message)
+    Write-Log $Message 'WARN'
+    $Manifest.Warnings.Add($Message)
+    Save-Manifest
+}
+
+function Add-InstallError {
+    param([string]$Message)
+    Write-Log $Message 'FAIL'
+    $Manifest.Errors.Add($Message)
+    Save-Manifest
+}
+
+function Send-UserNotification {
+    param(
+        [Parameter(Mandatory)][string]$Message,
+        [int]$TimeoutSeconds = 120
+    )
+
+    try {
+        & "$env:SystemRoot\System32\msg.exe" * /TIME:$TimeoutSeconds $Message 2>&1 | Out-Null
+        Write-Log "User notification sent: $Message" 'OK'
+    } catch {
+        Write-Log "Could not send user notification: $_" 'WARN'
+    }
+}
+
+# ---------------------------------------------------------------------------
 # Package catalog
-# Each entry: Name, Roles[], Winget, Choco, Direct (scriptblock → URL),
-#             DArgs (silent args), DType (exe|msi|msix|exe-args|zip-to-path)
-# ─────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 $Packages = @(
     @{
         Name      = 'Git for Windows'
-        Roles     = @('Core', 'Dev', 'CloudOps', 'All')
+        Roles     = @('Core','Dev','CloudOps','All')
         Winget    = 'Git.Git'
         Choco     = 'git'
         VerifyCmd = 'git'
         Direct    = {
             $r = Invoke-RestMethod 'https://api.github.com/repos/git-for-windows/git/releases/latest'
-            ($r.assets | Where-Object { $_.name -match '-64-bit\.exe$' }).browser_download_url
+            ($r.assets | Where-Object { $_.name -match '-64-bit\.exe$' } | Select-Object -First 1).browser_download_url
         }
         DArgs     = '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /COMPONENTS="icons,ext\reg\shellhere,assoc,assoc_sh"'
         DType     = 'exe'
     }
     @{
         Name      = 'Visual Studio Code'
-        Roles     = @('Core', 'Dev', 'CloudOps', 'All')
+        Roles     = @('Core','Dev','CloudOps','All')
         Winget    = 'Microsoft.VisualStudioCode'
         Choco     = 'vscode'
         VerifyCmd = 'code'
         VerifyExe = 'C:\Program Files\Microsoft VS Code\Code.exe'
-        Direct    = {
-            # The /latest redirect resolves to the current stable installer
-            'https://update.code.visualstudio.com/latest/win32-x64/stable'
-        }
+        Direct    = { 'https://update.code.visualstudio.com/latest/win32-x64/stable' }
         DArgs     = '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /MERGETASKS=!runcode,addcontextmenufiles,addcontextmenufolders,associatewithfiles,addtopath'
         DType     = 'exe'
     }
     @{
         Name      = 'PowerShell 7'
-        Roles     = @('Core', 'Dev', 'CloudOps', 'All')
+        Roles     = @('Core','Dev','CloudOps','All')
         Winget    = 'Microsoft.PowerShell'
         Choco     = 'powershell-core'
         VerifyCmd = 'pwsh'
+        VerifyExe = 'C:\Program Files\PowerShell\7\pwsh.exe'
+        FallbackExes = @('C:\Program Files\PowerShell\7\pwsh.exe')
         Direct    = {
             $r = Invoke-RestMethod 'https://api.github.com/repos/PowerShell/PowerShell/releases/latest'
-            ($r.assets | Where-Object { $_.name -match 'win-x64\.msi$' -and $_.name -notmatch 'preview' }).browser_download_url
+            ($r.assets | Where-Object { $_.name -match 'win-x64\.msi$' -and $_.name -notmatch 'preview' } | Select-Object -First 1).browser_download_url
         }
         DArgs     = '/quiet /norestart ADD_EXPLORER_CONTEXT_MENU_OPENPOWERSHELL=1 REGISTER_MANIFEST=1 USE_MU=1 ENABLE_MU=1'
         DType     = 'msi'
     }
     @{
         Name      = 'nvm-windows'
-        Roles     = @('Dev', 'All')
-        Winget    = $null     # winget installs nvm per-user (AppData) — must be machine-wide for all users
-        Choco     = $null     # choco nvm silently no-ops as SYSTEM
-        VerifyCmd = 'nvm'     # skip if already machine-wide; zip-to-path would wipe existing node versions
-        # nvm-noinstall.zip extracts nvm.exe to ZipDest — machine-wide, no installer UI.
-        # We write settings.txt and set machine env vars in Install-ClaudeCode.
+        Roles     = @('Dev','All')
+        Winget    = $null
+        Choco     = $null
+        VerifyCmd = 'nvm'
+        VerifyExe = 'C:\ProgramData\nvm\nvm.exe'
         Direct    = {
             $r = Invoke-RestMethod 'https://api.github.com/repos/coreybutler/nvm-windows/releases/latest'
-            ($r.assets | Where-Object { $_.name -eq 'nvm-noinstall.zip' }).browser_download_url
+            ($r.assets | Where-Object { $_.name -eq 'nvm-noinstall.zip' } | Select-Object -First 1).browser_download_url
         }
         DType     = 'zip-to-path'
         ZipDest   = 'C:\ProgramData\nvm'
     }
     @{
-        Name   = 'Python 3.12'
-        Roles  = @('Dev', 'All')
-        Winget = 'Python.Python.3.12'
-        Choco  = 'python312'   # fallback if bundled EXE fails (pre-cleanup in Install-ViaDirectDownload clears ghost state first)
-        Direct = {
+        Name      = 'Python 3.12'
+        Roles     = @('Dev','All')
+        Winget    = 'Python.Python.3.12'
+        Choco     = 'python312'
+        VerifyCmd = 'python'
+        FallbackExes = @(
+            'C:\Program Files\Python312\python.exe',
+            'C:\Program Files\Python313\python.exe',
+            'C:\Python312\python.exe',
+            'C:\Python3\python.exe'
+        )
+        Direct    = {
             try {
                 $releases = Invoke-RestMethod 'https://api.github.com/repos/python/cpython/releases?per_page=30'
-                $rel = $releases | Where-Object { $_.tag_name -match '^v3\.12\.' -and -not $_.prerelease } |
-                       Select-Object -First 1
-                $asset = $rel.assets | Where-Object { $_.name -match 'amd64\.exe$' }
+                $rel = $releases | Where-Object { $_.tag_name -match '^v3\.12\.' -and -not $_.prerelease } | Select-Object -First 1
+                $asset = $rel.assets | Where-Object { $_.name -match 'amd64\.exe$' } | Select-Object -First 1
                 if ($asset) { return $asset.browser_download_url }
             } catch { }
-            # Fallback to known stable
             'https://www.python.org/ftp/python/3.12.9/python-3.12.9-amd64.exe'
         }
-        DArgs      = '/quiet InstallAllUsers=1 PrependPath=1 Include_test=0'
-        DType      = 'exe'
-        VerifyCmd  = 'python'   # Skip install if python is already functional
-        # Known machine-wide install paths — used as fallback when 1638 persists after uninstall attempt
+        DArgs     = '/quiet InstallAllUsers=1 PrependPath=1 Include_test=0'
+        DType     = 'exe'
         AltPaths  = @(
             'C:\Program Files\Python312',
             'C:\Program Files\Python313',
@@ -257,23 +410,20 @@ $Packages = @(
     }
     @{
         Name      = 'GitHub CLI'
-        Roles     = @('Dev', 'All')
+        Roles     = @('Dev','All')
         Winget    = 'GitHub.cli'
         Choco     = 'gh'
         VerifyCmd = 'gh'
         Direct    = {
             $r = Invoke-RestMethod 'https://api.github.com/repos/cli/cli/releases/latest'
-            ($r.assets | Where-Object { $_.name -match 'windows_amd64\.msi$' }).browser_download_url
+            ($r.assets | Where-Object { $_.name -match 'windows_amd64\.msi$' } | Select-Object -First 1).browser_download_url
         }
         DArgs     = '/quiet /norestart'
         DType     = 'msi'
     }
     @{
-        # WSL2 must be installed before Docker Desktop (Docker requires it for the wsl-2 backend).
-        # Installs the WSL2 kernel only — no Linux distro.  A reboot is required for WSL to
-        # become active; NinjaOne should be configured to restart the machine after this script.
         Name   = 'Windows Subsystem for Linux 2'
-        Roles  = @('Dev', 'All')
+        Roles  = @('Dev','All')
         Winget = 'Microsoft.WSL'
         Choco  = $null
         Direct = $null
@@ -282,31 +432,27 @@ $Packages = @(
     }
     @{
         Name      = 'Docker Desktop'
-        Roles     = @('Dev', 'All')
+        Roles     = @('Dev','All')
         Winget    = 'Docker.DockerDesktop'
         Choco     = 'docker-desktop'
-        VerifyCmd = 'docker'   # docker CLI present means Desktop is installed; reinstall resets settings
-        Direct    = {
-            'https://desktop.docker.com/win/main/amd64/Docker%20Desktop%20Installer.exe'
-        }
+        VerifyCmd = 'docker'
+        Direct    = { 'https://desktop.docker.com/win/main/amd64/Docker%20Desktop%20Installer.exe' }
         DArgs     = 'install --quiet --accept-license --backend=wsl-2'
         DType     = 'exe-args'
     }
     @{
         Name      = 'AWS CLI v2'
-        Roles     = @('CloudOps', 'All')
+        Roles     = @('CloudOps','All')
         Winget    = 'Amazon.AWSCLI'
         Choco     = 'awscli'
         VerifyCmd = 'aws'
-        Direct    = {
-            'https://awscli.amazonaws.com/AWSCLIV2.msi'
-        }
+        Direct    = { 'https://awscli.amazonaws.com/AWSCLIV2.msi' }
         DArgs     = '/quiet /norestart'
         DType     = 'msi'
     }
     @{
         Name      = 'Terraform'
-        Roles     = @('CloudOps', 'All')
+        Roles     = @('CloudOps','All')
         Winget    = 'Hashicorp.Terraform'
         Choco     = 'terraform'
         VerifyCmd = 'terraform'
@@ -315,91 +461,44 @@ $Packages = @(
             $ver = $cp.current_version
             "https://releases.hashicorp.com/terraform/$ver/terraform_${ver}_windows_amd64.zip"
         }
-        DArgs     = $null
         DType     = 'zip-to-path'
         ZipDest   = 'C:\Program Files\Terraform'
     }
-    <#  Keeper Commander — disabled 2026-04-20
-        pip install keepercommander fails consistently on NinjaOne SYSTEM sessions:
-        Zscaler SSL inspection blocks pypi.org even after CA cert injection into
-        certifi. Needs KSM licensing + a non-pip delivery method before re-enabling.
-    @{
-        Name   = 'Keeper Commander'
-        Roles  = @('Dev', 'All')
-        Winget = $null
-        Choco  = $null
-        Direct = $null   # pip install — no download URL
-        DArgs  = $null
-        DType  = 'pip'
-        PipPkg = 'keepercommander'
-    }
-    #>
     @{
         Name       = 'Claude Desktop'
-        Roles      = @('Dev', 'All')
+        Roles      = @('Dev','All')
         Winget     = $null
-        Choco      = $null   # choco installs as per-user MSIX for SYSTEM, not machine-wide provisioned; use direct MSIX tier
-        Direct     = {
-            'https://claude.ai/api/desktop/win32/x64/msix/latest/redirect'
-        }
-        DArgs      = $null
+        Choco      = $null
+        Direct     = { 'https://claude.ai/api/desktop/win32/x64/msix/latest/redirect' }
         DType      = 'msix'
-        VerifyAppx = '*Claude*'   # skip if already provisioned machine-wide
+        VerifyAppx = '*Claude*'
     }
 )
 
-# ─────────────────────────────────────────────────────────────────────────────
-# VS Code extensions — installed per-user by Configure-UserEnvironment.ps1
-# ─────────────────────────────────────────────────────────────────────────────
 $VsCodeExtensions = @(
-    'ms-vscode.PowerShell'
-    'ms-python.python'        # Pylance ships as a dependency — no separate entry needed
-    'hashicorp.terraform'
-    'amazonwebservices.aws-toolkit-vscode'
-    'GitHub.vscode-pull-request-github'
-    'eamodio.gitlens'
-    'ms-vscode-remote.remote-wsl'
-    'esbenp.prettier-vscode'
-    'dbaeumer.vscode-eslint'
+    'ms-vscode.PowerShell',
+    'ms-python.python',
+    'hashicorp.terraform',
+    'amazonwebservices.aws-toolkit-vscode',
+    'GitHub.vscode-pull-request-github',
+    'eamodio.gitlens',
+    'ms-vscode-remote.remote-wsl',
+    'esbenp.prettier-vscode',
+    'dbaeumer.vscode-eslint',
     'ms-azuretools.vscode-docker'
 )
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Network / TLS helpers
-# ─────────────────────────────────────────────────────────────────────────────
-function Set-TlsPolicy {
-    [Net.ServicePointManager]::SecurityProtocol =
-        [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13
-}
-
-function Invoke-Download {
-    param([string]$Url, [string]$Dest)
-    for ($i = 1; $i -le $MaxRetries; $i++) {
-        # Remove any partial file from a previous failed attempt before retrying —
-        # Invoke-WebRequest can leave a locked/partial file on failure.
-        if (Test-Path $Dest) { Remove-Item $Dest -Force -ErrorAction SilentlyContinue }
-        try {
-            Invoke-WebRequest $Url -OutFile $Dest -UseBasicParsing -ErrorAction Stop
-            return
-        } catch {
-            if ($i -eq $MaxRetries) { throw }
-            Write-Log "Download attempt $i failed ($Url) — retrying in 10 s." 'WARN'
-            Start-Sleep -Seconds 10
-        }
-    }
-}
-
-# ─────────────────────────────────────────────────────────────────────────────
-# winget — self-healing
-# ─────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# winget
+# ---------------------------------------------------------------------------
 function Repair-WingetSources {
-    Write-Log 'Resetting and refreshing winget sources…' 'DIAG'
     try {
+        Write-Log 'Resetting and refreshing winget sources.' 'DIAG'
         & winget source reset --force 2>&1 | Out-Null
-        & winget source update         2>&1 | Out-Null
+        & winget source update 2>&1 | Out-Null
         Write-Log 'winget sources refreshed.' 'OK'
     } catch {
-        Write-Log "Source refresh warning: $_" 'WARN'
+        Write-Log "winget source refresh warning: $_" 'WARN'
     }
 }
 
@@ -413,36 +512,19 @@ function Ensure-Winget {
         return $true
     }
 
-    # MSIX installation requires a user session — always fails under SYSTEM.
     if ($RunningAsSystem) {
-        Write-Log 'winget not found and cannot be repaired under SYSTEM — skipping.' 'DIAG'
+        Write-Log 'winget not found under SYSTEM. Skipping winget repair.' 'DIAG'
         return $false
     }
 
-    Write-Log 'winget not found — repairing via App Installer MSIX…' 'WARN'
-
-    # Method 1: Microsoft's redirect (aka.ms/getwinget)
     try {
-        $tmp = Join-Path $env:TEMP 'AppInstaller.msixbundle'
+        $tmp = Join-Path $TempDir 'AppInstaller.msixbundle'
         Invoke-Download 'https://aka.ms/getwinget' $tmp
         Add-AppxPackage -Path $tmp -ForceApplicationShutdown -ErrorAction Stop
-        Write-Log 'App Installer installed from aka.ms/getwinget.' 'OK'
-        return $true
+        Update-SessionPath
+        return (Get-Command winget -ErrorAction SilentlyContinue) -ne $null
     } catch {
-        Write-Log "App Installer MSIX (aka.ms) failed: $_" 'WARN'
-    }
-
-    # Method 2: GitHub latest release
-    try {
-        $r   = Invoke-RestMethod 'https://api.github.com/repos/microsoft/winget-cli/releases/latest'
-        $url = ($r.assets | Where-Object { $_.name -match '\.msixbundle$' }).browser_download_url
-        $tmp = Join-Path $env:TEMP 'winget-latest.msixbundle'
-        Invoke-Download $url $tmp
-        Add-AppxPackage -Path $tmp -ForceApplicationShutdown -ErrorAction Stop
-        Write-Log 'winget installed from GitHub release.' 'OK'
-        return $true
-    } catch {
-        Write-Log "winget GitHub fallback failed: $_" 'FAIL'
+        Write-Log "winget repair failed: $_" 'WARN'
         return $false
     }
 }
@@ -452,78 +534,70 @@ function Install-ViaWinget {
     param([hashtable]$Pkg)
 
     if (-not $Pkg.Winget) { return $false }
+    if (-not (Ensure-Winget)) { return $false }
+
     $id = $Pkg.Winget
 
-    Write-Log "  winget upgrade/install $id…" 'DIAG'
-
     for ($i = 1; $i -le $MaxRetries; $i++) {
-        # Try upgrade first — no-ops if already at latest, reports "No installed package found" if absent
-        Write-Log "  winget upgrade $id (attempt $i)…" 'DIAG'
-        $out = & winget upgrade --id $id --silent `
-               --accept-package-agreements --accept-source-agreements --scope machine 2>&1
-        $raw = ($out -join "`n")
+        Write-Log "  winget install/upgrade $id attempt $i." 'DIAG'
 
-        if ($LASTEXITCODE -eq 0 -or $raw -match '(?i)no applicable upgrade|already installed') {
-            Write-Log "  winget OK (up to date): $id" 'OK'
+        $out = & winget upgrade --id $id --silent --accept-package-agreements --accept-source-agreements --scope machine --disable-interactivity 2>&1
+        $raw = $out -join "`n"
+
+        if ($LASTEXITCODE -eq 0 -or $raw -match '(?i)no applicable upgrade|already installed|no available upgrade') {
+            Write-Log "  winget OK: $id" 'OK'
             return $true
         }
 
-        if ($raw -match '(?i)No installed package found|not installed') {
-            # Package is absent — fall through to install
-            Write-Log "  $id not yet installed — running winget install…" 'DIAG'
-            $out = & winget install --id $id --silent `
-                   --accept-package-agreements --accept-source-agreements `
-                   --scope machine 2>&1
-            $raw = ($out -join "`n")
+        if ($raw -match '(?i)No installed package found|not installed|No applicable update') {
+            $out = & winget install --id $id --silent --accept-package-agreements --accept-source-agreements --scope machine --disable-interactivity 2>&1
+            $raw = $out -join "`n"
             if ($LASTEXITCODE -eq 0 -or $raw -match '(?i)already installed') {
                 Write-Log "  winget install OK: $id" 'OK'
                 return $true
             }
         }
 
-        # Diagnose and heal before next attempt
         if ($raw -match '(?i)No package found') {
-            Write-Log "  Package '$id' not in winget catalog — skipping tier." 'WARN'
+            Write-Log "  winget package not found: $id" 'WARN'
             return $false
         }
+
         if ($raw -match '(?i)source agreements') {
-            Write-Log "  Source agreement error — refreshing sources." 'DIAG'
             Repair-WingetSources
-        } elseif ($raw -match '(?i)timeout|network|unable to connect|no internet') {
-            Write-Log "  Network error (attempt $i) — waiting 15 s." 'DIAG'
+        } elseif ($raw -match '(?i)timeout|network|unable to connect|internet') {
             Start-Sleep -Seconds 15
         } elseif ($raw -match '(?i)another installation is in progress|locked|access is denied') {
-            Write-Log "  Process lock (attempt $i) — waiting 30 s." 'DIAG'
             Start-Sleep -Seconds 30
         } else {
-            Write-Log "  winget error (attempt $i/$MaxRetries): exit $LASTEXITCODE" 'WARN'
-            if ($i -lt $MaxRetries) { Start-Sleep -Seconds 5 }
+            Write-Log "  winget failed attempt $i for $id. Exit $LASTEXITCODE. $raw" 'WARN'
+            Start-Sleep -Seconds 5
         }
     }
-    Write-Log "  winget exhausted after $MaxRetries attempts for $id." 'WARN'
+
     return $false
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Chocolatey — self-healing
-# ─────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Chocolatey
+# ---------------------------------------------------------------------------
 function Ensure-Chocolatey {
     [OutputType([bool])]
     param()
 
     if (Get-Command choco -ErrorAction SilentlyContinue) {
-        $v = (& choco --version 2>&1)[0]
+        $v = (& choco --version 2>&1 | Select-Object -First 1)
         Write-Log "Chocolatey $v is present." 'DIAG'
         return $true
     }
 
-    Write-Log 'Installing Chocolatey…' 'DIAG'
     try {
+        Write-Log 'Installing Chocolatey.' 'DIAG'
         Set-TlsPolicy
-        $script = (Invoke-WebRequest 'https://community.chocolatey.org/install.ps1' -UseBasicParsing).Content
+        $script = (Invoke-WebRequest 'https://community.chocolatey.org/install.ps1' -UseBasicParsing -ErrorAction Stop).Content
         Invoke-Expression $script
-        # Re-source PATH so choco is findable
         Update-SessionPath
+
         if (Get-Command choco -ErrorAction SilentlyContinue) {
             Write-Log 'Chocolatey installed.' 'OK'
             $Manifest.ChocolateyInstalled = $true
@@ -531,8 +605,9 @@ function Ensure-Chocolatey {
             return $true
         }
     } catch {
-        Write-Log "Chocolatey install failed: $_" 'FAIL'
+        Write-Log "Chocolatey install failed: $_" 'WARN'
     }
+
     return $false
 }
 
@@ -541,154 +616,93 @@ function Install-ViaChocolatey {
     param([hashtable]$Pkg)
 
     if (-not $Pkg.Choco) { return $false }
-    if (-not (Ensure-Chocolatey))  { return $false }
+    if (-not (Ensure-Chocolatey)) { return $false }
 
     $id = $Pkg.Choco
-    Write-Log "  choco upgrade $id…" 'DIAG'
 
     for ($i = 1; $i -le $MaxRetries; $i++) {
-        # choco upgrade installs if absent, upgrades if present — inherently idempotent
-        $lines = [System.Collections.Generic.List[string]]::new()
-        & choco upgrade $id --yes --no-progress 2>&1 | ForEach-Object {
-            $lines.Add([string]$_)
-            Write-Log "  [choco] $_" 'DIAG'
-        }
-        $raw = $lines -join "`n"
+        Write-Log "  choco upgrade $id attempt $i." 'DIAG'
 
-        # Only treat "already installed" as success when it refers to THIS package,
-        # not a dependency — prevents false positives from vcredist/KB entries.
-        $pkgAlreadyPresent = $raw -match "(?i)$([regex]::Escape($id)).*(already installed|is the latest version)"
-        if ($LASTEXITCODE -eq 0 -or $pkgAlreadyPresent) {
+        $result = Invoke-Process -FilePath 'choco.exe' `
+            -ArgumentList @('upgrade', $id, '--yes', '--no-progress') `
+            -TimeoutSeconds 900 `
+            -Label 'choco'
+
+        $raw = $result.Output
+
+        $pkgAlreadyPresent = $raw -match "(?i)$([regex]::Escape($id)).*(already installed|is the latest version|latest version available)"
+        if ($result.ExitCode -eq 0 -or $pkgAlreadyPresent) {
             Write-Log "  choco OK: $id" 'OK'
-            Write-Log "  choco output: $raw" 'DIAG'
-            # If VerifyExe is defined and the binary is absent, choco hit a ghost registry
-            # entry and skipped the actual install.  Force a reinstall to lay down the files.
-            $verifyExe = if ($Pkg.ContainsKey('VerifyExe')) { $Pkg['VerifyExe'] } else { $null }
+            Update-SessionPath
+
+            $verifyExe = if ($Pkg.ContainsKey('VerifyExe')) { $Pkg.VerifyExe } else { $null }
             if ($verifyExe -and -not (Test-Path $verifyExe)) {
-                Write-Log "  VerifyExe missing after choco ($verifyExe) — forcing reinstall…" 'WARN'
-                & choco install $id --yes --no-progress --force 2>&1 | ForEach-Object {
-                    Write-Log "  [choco --force] $_" 'DIAG'
+                Write-Log "  choco reported success but VerifyExe is missing: $verifyExe. Forcing reinstall." 'WARN'
+                $force = Invoke-Process -FilePath 'choco.exe' `
+                    -ArgumentList @('install', $id, '--yes', '--no-progress', '--force') `
+                    -TimeoutSeconds 900 `
+                    -Label 'choco-force'
+                Update-SessionPath
+                if ($force.ExitCode -ne 0 -and -not (Test-Path $verifyExe)) {
+                    Write-Log "  Forced Chocolatey install did not create VerifyExe: $verifyExe" 'WARN'
+                    return $false
                 }
             }
+
             return $true
         }
 
+        if ($result.TimedOut) {
+            Write-Log "  choco timed out for $id." 'WARN'
+            return $false
+        }
+
         if ($raw -match '(?i)timeout|network|unable to connect') {
-            Write-Log "  Choco network issue (attempt $i) — waiting 15 s." 'DIAG'
             Start-Sleep -Seconds 15
-        } elseif ($raw -match '(?i)locked|access is denied') {
-            Write-Log "  Choco lock (attempt $i) — waiting 30 s." 'DIAG'
+        } elseif ($raw -match '(?i)locked|access is denied|another installation') {
             Start-Sleep -Seconds 30
         } else {
-            Write-Log "  Choco error (attempt $i/$MaxRetries): exit $LASTEXITCODE" 'WARN'
-            Write-Log "  choco output: $raw" 'DIAG'
-            if ($i -lt $MaxRetries) { Start-Sleep -Seconds 5 }
+            Write-Log "  choco failed attempt $i for $id. Exit $($result.ExitCode)." 'WARN'
+            Start-Sleep -Seconds 5
         }
     }
-    Write-Log "  Choco exhausted for $id." 'WARN'
+
     return $false
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Direct download — self-healing
-# ─────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Direct installers
+# ---------------------------------------------------------------------------
+function Get-BundledPath {
+    param([hashtable]$Pkg)
+
+    $ext = switch ($Pkg.DType) {
+        'msi'         { '.msi' }
+        'zip-to-path' { '.zip' }
+        'msix'        { '.msix' }
+        default       { '.exe' }
+    }
+
+    $fileName = "ME_$($Pkg.Name -replace '[^\w]','_')$ext"
+    return Join-Path (Join-Path $PSScriptRoot '..\bundled') $fileName
+}
+
 function Install-ViaDirectDownload {
     [OutputType([bool])]
     param([hashtable]$Pkg)
 
-    # ── WSL — built-in Windows command, no download needed ──────────────────
     if ($Pkg.DType -eq 'wsl-install') {
-        Write-Log "  Installing WSL via: wsl.exe $($Pkg.DArgs)" 'DIAG'
         try {
-            $p = Start-Process 'wsl.exe' -ArgumentList ($Pkg.DArgs -split '\s+') `
-                     -Wait -PassThru -NoNewWindow
-            # 0 = success; 1 = success but reboot required (normal on first install)
-            if ($p.ExitCode -in @(0, 1)) {
-                Write-Log '  WSL installed OK — reboot required to fully activate WSL2.' 'OK'
+            Write-Log "  Installing WSL via wsl.exe $($Pkg.DArgs)" 'DIAG'
+            $result = Invoke-Process -FilePath 'wsl.exe' -ArgumentList ($Pkg.DArgs -split '\s+') -TimeoutSeconds 1200 -Label 'wsl'
+            if ($result.ExitCode -in @(0,1,3010)) {
+                Write-Log '  WSL installed or already enabled. Reboot may be required.' 'OK'
                 return $true
             }
-            throw "wsl.exe exited $($p.ExitCode)"
+            Write-Log "  WSL exited $($result.ExitCode)." 'WARN'
         } catch {
-            Write-Log "  WSL direct install failed: $_" 'WARN'
-            return $false
+            Write-Log "  WSL install failed: $_" 'WARN'
         }
-    }
-
-    # ── pip — Python package install (no download URL needed) ───────────────
-    if ($Pkg.DType -eq 'pip') {
-        $pipPkg = if ($Pkg.ContainsKey('PipPkg')) { $Pkg['PipPkg'] } else { $null }
-        if (-not $pipPkg) { Write-Log '  PipPkg not set — skipping.' 'WARN'; return $false }
-        $pythonCmd = Get-Command python -ErrorAction SilentlyContinue
-        $pythonExe = if ($pythonCmd) { $pythonCmd.Source } else { $null }
-        if (-not $pythonExe) {
-            $candidates = @(
-                'C:\Program Files\Python312\python.exe',
-                'C:\Program Files\Python313\python.exe',
-                'C:\Program Files\Python311\python.exe',
-                'C:\Python312\python.exe',
-                'C:\Python3\python.exe'
-            )
-            $pythonExe = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
-        }
-        if (-not $pythonExe) {
-            Write-Log "  Python not found — cannot pip install $pipPkg." 'WARN'
-            return $false
-        }
-        # Append corporate CA certs (e.g. Zscaler) to certifi bundle so pip can
-        # reach pypi.org through SSL-inspecting proxies. Exports every non-standard
-        # root from the Windows trusted root store and appends any that are missing.
-        try {
-            $certifiBundle = & $pythonExe -c 'import certifi; print(certifi.where())' 2>&1
-            if ($certifiBundle -and (Test-Path $certifiBundle)) {
-                $bundleContent = Get-Content $certifiBundle -Raw
-                $roots = & "$env:SystemRoot\System32\certutil.exe" -store Root 2>&1
-                $thumbprints = [regex]::Matches($roots, 'Cert Hash\(sha1\):\s+([0-9a-f]+)') |
-                               ForEach-Object { $_.Groups[1].Value }
-                foreach ($thumb in $thumbprints) {
-                    $cerFile = Join-Path $env:TEMP "$thumb.cer"
-                    $pemFile = Join-Path $env:TEMP "$thumb.pem"
-                    $null = & "$env:SystemRoot\System32\certutil.exe" -store Root $thumb $cerFile 2>&1
-                    if (-not (Test-Path $cerFile)) { continue }
-                    $null = & "$env:SystemRoot\System32\certutil.exe" -encode $cerFile $pemFile 2>&1
-                    if (-not (Test-Path $pemFile)) { continue }
-                    $pemContent = Get-Content $pemFile -Raw
-                    # Extract just the base64 block to check for duplicates
-                    $b64 = [regex]::Match($pemContent, '-----BEGIN CERTIFICATE-----(.+?)-----END CERTIFICATE-----', [System.Text.RegularExpressions.RegexOptions]::Singleline).Groups[1].Value -replace '\s',''
-                    if ($b64 -and $bundleContent -notlike "*$b64*") {
-                        Add-Content $certifiBundle "`r`n$pemContent"
-                        Write-Log "  Appended CA cert ($thumb) to certifi bundle" 'DIAG'
-                    }
-                    Remove-Item $cerFile,$pemFile -Force -ErrorAction SilentlyContinue
-                }
-            }
-        } catch {
-            Write-Log "  CA cert injection warning: $_ — pip may fail behind SSL proxy" 'WARN'
-        }
-
-        Write-Log "  pip install $pipPkg ($pythonExe)…" 'DIAG'
-        # Use Start-Process + redirect-to-files + WaitForExit(timeout) so a hung
-        # pip (e.g. Zscaler blocking pypi.org) does not freeze the whole script.
-        $pipStdout = Join-Path $env:TEMP "pip_out_$PID.txt"
-        $pipStderr = Join-Path $env:TEMP "pip_err_$PID.txt"
-        $pipProc = Start-Process $pythonExe `
-            -ArgumentList @('-m', 'pip', 'install', $pipPkg, '--timeout', '60') `
-            -RedirectStandardOutput $pipStdout `
-            -RedirectStandardError  $pipStderr `
-            -PassThru -NoNewWindow
-        $pipDone = $pipProc.WaitForExit(180000)   # 3-minute wall-clock timeout
-        if (-not $pipDone) {
-            try { $pipProc.Kill() } catch {}
-            Write-Log '  pip killed after 180 s — network hang suspected.' 'WARN'
-            Remove-Item $pipStdout,$pipStderr -Force -ErrorAction SilentlyContinue
-            return $false
-        }
-        $pipExit = $pipProc.ExitCode
-        Get-Content $pipStdout -ErrorAction SilentlyContinue | ForEach-Object { Write-Log "  [pip] $_" 'DIAG' }
-        Get-Content $pipStderr -ErrorAction SilentlyContinue | ForEach-Object { Write-Log "  [pip:err] $_" 'DIAG' }
-        Remove-Item $pipStdout,$pipStderr -Force -ErrorAction SilentlyContinue
-        Write-Log "  pip exit $pipExit" 'DIAG'
-        if ($pipExit -eq 0) { Write-Log "  pip OK: $pipPkg" 'OK'; return $true }
-        Write-Log "  pip failed for $pipPkg." 'WARN'
         return $false
     }
 
@@ -700,37 +714,27 @@ function Install-ViaDirectDownload {
         'msix'        { '.msix' }
         default       { '.exe' }
     }
-    $tmpFileName  = "ME_$($Pkg.Name -replace '[^\w]','_')$ext"
 
-    # ── Bundled installer check ───────────────────────────────────────────────
-    # Package-Release.ps1 pre-downloads Python and VS Code into bundled/ so they
-    # ship inside the zip.  Use the bundled copy when available — avoids a network
-    # download for the two most failure-prone packages.
-    $bundledDir   = Join-Path $PSScriptRoot '..\bundled'
-    $bundledFile  = Join-Path $bundledDir $tmpFileName
-    $tmpFile      = $null
-    $isFromBundle = $false
+    $tmpFileName = "ME_$($Pkg.Name -replace '[^\w]','_')$ext"
+    $bundledFile = Get-BundledPath $Pkg
+    $tmpFile = $null
+    $isBundled = $false
 
     if (Test-Path $bundledFile) {
-        Write-Log "  Bundled installer found — skipping download: $bundledFile" 'OK'
-        $tmpFile      = $bundledFile
-        $isFromBundle = $true
+        $tmpFile = [System.IO.Path]::GetFullPath($bundledFile)
+        $isBundled = $true
+        Write-Log "  Bundled installer found: $tmpFile" 'OK'
     } else {
-        Write-Log "  Resolving direct download URL for $($Pkg.Name)…" 'DIAG'
-        $url = $null
-        try { $url = & $Pkg.Direct } catch {
-            Write-Log "  URL resolution failed: $_" 'WARN'
-            return $false
-        }
-        if (-not $url) {
-            Write-Log '  Direct URL resolved to null.' 'WARN'
-            return $false
-        }
+        try {
+            Write-Log "  Resolving direct URL for $($Pkg.Name)." 'DIAG'
+            $url = & $Pkg.Direct
+            if (-not $url) { throw 'URL resolved to null.' }
 
-        $tmpFile = Join-Path $env:TEMP $tmpFileName
-        Write-Log "  Downloading: $url" 'DIAG'
-        try { Invoke-Download $url $tmpFile } catch {
-            Write-Log "  Download failed: $_" 'FAIL'
+            $tmpFile = Join-Path $TempDir $tmpFileName
+            Write-Log "  Downloading: $url" 'DIAG'
+            Invoke-Download $url $tmpFile
+        } catch {
+            Write-Log "  Direct download failed: $_" 'WARN'
             return $false
         }
     }
@@ -738,334 +742,189 @@ function Install-ViaDirectDownload {
     try {
         switch ($Pkg.DType) {
             'exe' {
-                # For EXE installers with AltPaths (currently Python only): proactively
-                # clean any ghost MSI state before attempting install. Python's bootstrapper
-                # exits 0 even when its child msiexec fails due to ghost registrations —
-                # the reactive 1638 handler never fires because the parent never returns 1638.
-                # Pre-clean unconditionally: registry uninstall + bundled /uninstall + MSI DB scrub.
-                if ($Pkg.ContainsKey('AltPaths') -and $Pkg['AltPaths']) {
-                    Write-Log "  Pre-install: clearing any ghost MSI state for '$($Pkg.Name)'…" 'DIAG'
-                    $pkgBaseName = $Pkg.Name.Split(' ')[0]
-                    # 1) Registry-based uninstall of any detected version (version-agnostic)
-                    $uninstallKeys = @(
-                        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
-                        'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
-                    )
-                    Get-ItemProperty $uninstallKeys -ErrorAction SilentlyContinue | ForEach-Object {
-                        $dn = $null
-                        try { if ($_.PSObject.Properties['DisplayName']) { $dn = $_.DisplayName } } catch { }
-                        if ($dn -and $dn -like "*$pkgBaseName*") {
-                            $us = $null
-                            try { $us = $_.UninstallString } catch { }
-                            if ($us -and $us -match 'msiexec') {
-                                $code = [regex]::Match($us, '\{[^}]+\}').Value
-                                if ($code) {
-                                    Write-Log "  Pre-install: uninstalling $dn ($code)…" 'DIAG'
-                                    Start-Process msiexec.exe -ArgumentList "/x $code /quiet /norestart" -Wait -NoNewWindow | Out-Null
-                                }
-                            }
-                        }
-                    }
-                    # 2) Bundled EXE /uninstall — removes exact-version sub-MSIs atomically
-                    $pPre = Start-Process $tmpFile -ArgumentList '/quiet /uninstall' -Wait -PassThru -NoNewWindow
-                    Write-Log "  Pre-install /uninstall exited $($pPre.ExitCode)" 'DIAG'
-                    # 3) Scrub HKLM MSI product DB
-                    $msiProductsPath = 'HKLM:\SOFTWARE\Classes\Installer\Products'
-                    if (Test-Path $msiProductsPath) {
-                        Get-ChildItem $msiProductsPath -ErrorAction SilentlyContinue | ForEach-Object {
-                            $mp  = Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue
-                            $mpn = if ($mp -and $mp.PSObject.Properties['ProductName']) { $mp.PSObject.Properties['ProductName'].Value } else { $null }
-                            if ($mpn -and $mpn -like "*$pkgBaseName*") {
-                                Remove-Item $_.PSPath -Recurse -Force -ErrorAction SilentlyContinue
-                                Write-Log "  Pre-install: removed HKLM MSI product: $mpn" 'DIAG'
-                            }
-                        }
-                    }
-                    # 4) Scrub UserData MSI entries
-                    $msiUserDataRoot = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Installer\UserData'
-                    if (Test-Path $msiUserDataRoot) {
-                        Get-ChildItem $msiUserDataRoot -ErrorAction SilentlyContinue | ForEach-Object {
-                            $productsKey = Join-Path $_.PSPath 'Products'
-                            if (Test-Path $productsKey) {
-                                Get-ChildItem $productsKey -ErrorAction SilentlyContinue | ForEach-Object {
-                                    $ipKey = Join-Path $_.PSPath 'InstallProperties'
-                                    $ip = Get-ItemProperty $ipKey -ErrorAction SilentlyContinue
-                                    $ipn = if ($ip -and $ip.PSObject.Properties['DisplayName']) { $ip.PSObject.Properties['DisplayName'].Value } else { $null }
-                                    if ($ipn -and $ipn -like "*$pkgBaseName*") {
-                                        Remove-Item $_.PSPath -Recurse -Force -ErrorAction SilentlyContinue
-                                        Write-Log "  Pre-install: removed UserData MSI entry: $ipn" 'DIAG'
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    # 5) Remove Python Launcher files from disk — py.exe lives in C:\Windows\
-                    # and has its own MSI product registration. A ghost Launcher registration
-                    # causes the Python installer's Launcher sub-MSI to fail silently (exit 0
-                    # from parent but python.exe never appears). Remove both the files and any
-                    # remaining Launcher MSI products not caught by the *Python* name filter above.
-                    foreach ($launcherFile in @('C:\Windows\py.exe', 'C:\Windows\pyw.exe')) {
-                        if (Test-Path $launcherFile) {
-                            Remove-Item $launcherFile -Force -ErrorAction SilentlyContinue
-                            Write-Log "  Pre-install: removed $launcherFile" 'DIAG'
-                        }
-                    }
-                    if (Test-Path $msiProductsPath) {
-                        Get-ChildItem $msiProductsPath -ErrorAction SilentlyContinue | ForEach-Object {
-                            $mp  = Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue
-                            $mpn = if ($mp -and $mp.PSObject.Properties['ProductName']) { $mp.PSObject.Properties['ProductName'].Value } else { $null }
-                            if ($mpn -and $mpn -like '*Launcher*') {
-                                Remove-Item $_.PSPath -Recurse -Force -ErrorAction SilentlyContinue
-                                Write-Log "  Pre-install: removed Launcher MSI product: $mpn" 'DIAG'
-                            }
-                        }
-                    }
-                    Write-Log "  Pre-install cleanup complete." 'DIAG'
+                $args = if ($Pkg.DArgs) { $Pkg.DArgs } else { '' }
+                $result = Invoke-Process -FilePath $tmpFile -ArgumentList @($args) -TimeoutSeconds 1800
+                if ($result.ExitCode -notin @(0,3010)) {
+                    throw "Exit code $($result.ExitCode)"
                 }
 
-                $p = Start-Process $tmpFile -ArgumentList $Pkg.DArgs -Wait -PassThru -NoNewWindow
-                # 1638 = another version already registered in Programs & Features.
-                # Uninstall the conflicting entry via the registry, then retry once.
-                if ($p.ExitCode -eq 1638) {
-                    Write-Log "  Exit 1638 — existing version registered. Attempting registry uninstall of '$($Pkg.Name)'…" 'WARN'
-                    $uninstallKeys = @(
-                        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
-                        'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
-                    )
-                    # Guard against strict-mode crash: registry entries may lack DisplayName entirely.
-                    # Use try/catch inside the filter — PSObject.Properties check alone is not
-                    # sufficient in PS5.1 strict mode for all registry key types.
-                    $entry = Get-ItemProperty $uninstallKeys -ErrorAction SilentlyContinue |
-                             Where-Object {
-                                 $dn = $null
-                                 try { if ($_.PSObject.Properties['DisplayName']) { $dn = $_.DisplayName } } catch { }
-                                 $dn -and $dn -like "*$($Pkg.Name)*"
-                             } |
-                             Select-Object -First 1
-                    $usProp = if ($entry) { $entry.PSObject.Properties['UninstallString'] } else { $null }
-                    if ($usProp -and $usProp.Value) {
-                        $us = $usProp.Value
-                        if ($us -match 'msiexec') {
-                            $code = [regex]::Match($us, '\{[^}]+\}').Value
-                            Start-Process msiexec.exe -ArgumentList "/x $code /quiet /norestart" -Wait -NoNewWindow | Out-Null
-                        } else {
-                            if ($us -match '^"([^"]+)"(.*)$') { $unExe = $Matches[1]; $unArgs = $Matches[2].Trim() }
-                            else { $unExe = ($us -split ' ',2)[0]; $unArgs = ($us -split ' ',2)[1] }
-                            Start-Process $unExe -ArgumentList "$unArgs /SILENT /NORESTART" -Wait -NoNewWindow | Out-Null
-                        }
-                        Write-Log "  Registry uninstall complete." 'DIAG'
-                    } else {
-                        Write-Log "  No registry UninstallString found." 'WARN'
-                    }
-                    # Always run the bundled installer's own /uninstall after any registry-based
-                    # attempt.  Python bundles several sub-MSIs (Executables, Standard Library,
-                    # pip, etc.) — the registry uninstall only removes the wrapper product code.
-                    # The EXE /uninstall removes every sub-MSI atomically, clearing 1638 reliably.
-                    Write-Log "  Running installer /uninstall to remove all sub-components…" 'DIAG'
-                    $pUn = Start-Process $tmpFile -ArgumentList '/quiet /uninstall' -Wait -PassThru -NoNewWindow
-                    Write-Log "  Installer /uninstall exited $($pUn.ExitCode)" 'DIAG'
-                    # Clean MSI product database — Python's EXE installer checks
-                    # HKLM\SOFTWARE\Classes\Installer\Products\ (MSI internal DB), which
-                    # survives ordinary Uninstall key deletion and causes persistent 1638.
-                    $msiProductsPath = 'HKLM:\SOFTWARE\Classes\Installer\Products'
-                    if (Test-Path $msiProductsPath) {
-                        Get-ChildItem $msiProductsPath -ErrorAction SilentlyContinue | ForEach-Object {
-                            $mp  = Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue
-                            $mpn = if ($mp -and $mp.PSObject.Properties['ProductName']) { $mp.PSObject.Properties['ProductName'].Value } else { $null }
-                            if ($mpn -and $mpn -like "*$($Pkg.Name.Split(' ')[0])*") {
-                                Remove-Item $_.PSPath -Recurse -Force -ErrorAction SilentlyContinue
-                                Write-Log "  Removed MSI product registration: $mpn" 'DIAG'
+                if ($Pkg.ContainsKey('AltPaths') -and $Pkg.AltPaths) {
+                    $deadline = (Get-Date).AddSeconds(90)
+                    $found = $null
+                    while (-not $found -and (Get-Date) -lt $deadline) {
+                        foreach ($d in $Pkg.AltPaths) {
+                            if (Test-Path (Join-Path $d 'python.exe')) {
+                                $found = $d
+                                break
                             }
                         }
+                        if (-not $found) { Start-Sleep -Seconds 5 }
                     }
-                    # Also clean per-user MSI data (machine installs land under S-1-5-18)
-                    $msiUserDataRoot = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Installer\UserData'
-                    if (Test-Path $msiUserDataRoot) {
-                        Get-ChildItem $msiUserDataRoot -ErrorAction SilentlyContinue | ForEach-Object {
-                            $productsKey = Join-Path $_.PSPath 'Products'
-                            if (Test-Path $productsKey) {
-                                Get-ChildItem $productsKey -ErrorAction SilentlyContinue | ForEach-Object {
-                                    $ipKey = Join-Path $_.PSPath 'InstallProperties'
-                                    $ip = Get-ItemProperty $ipKey -ErrorAction SilentlyContinue
-                                    $ipn = if ($ip -and $ip.PSObject.Properties['DisplayName']) { $ip.PSObject.Properties['DisplayName'].Value } else { $null }
-                                    if ($ipn -and $ipn -like "*$($Pkg.Name.Split(' ')[0])*") {
-                                        Remove-Item $_.PSPath -Recurse -Force -ErrorAction SilentlyContinue
-                                        Write-Log "  Removed MSI UserData entry: $ipn" 'DIAG'
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    # Clean per-user MSI product store — the ghost registration that survives
-                    # all the above lives in HKEY_USERS\{SID}\SOFTWARE\Microsoft\Installer\Products
-                    # (not HKLM).  Two passes: (1) HKU for currently-loaded hives (user logged in),
-                    # (2) reg load for offline profiles (script running before user logs in).
-                    $pkgBaseName = $Pkg.Name.Split(' ')[0]
-                    try {
-                        # Pass 1 — loaded hives
-                        if (-not (Get-PSDrive HKU -ErrorAction SilentlyContinue)) {
-                            New-PSDrive -Name HKU -PSProvider Registry -Root HKEY_USERS `
-                                -ErrorAction SilentlyContinue | Out-Null
-                        }
-                        Get-ChildItem 'HKU:\' -ErrorAction SilentlyContinue |
-                            Where-Object { $_.PSChildName -match '^S-1-5-21' } |
-                            ForEach-Object {
-                                $hkuMsi = "HKU:\$($_.PSChildName)\SOFTWARE\Microsoft\Installer\Products"
-                                if (Test-Path $hkuMsi) {
-                                    Get-ChildItem $hkuMsi -ErrorAction SilentlyContinue | ForEach-Object {
-                                        $pp  = Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue
-                                        $ppn = $null
-                                        try { if ($pp -and $pp.PSObject.Properties['ProductName']) { $ppn = $pp.ProductName } } catch { }
-                                        if ($ppn -and $ppn -like "*$pkgBaseName*") {
-                                            Remove-Item $_.PSPath -Recurse -Force -ErrorAction SilentlyContinue
-                                            Write-Log "  Removed per-user MSI product ($($_.PSChildName -replace 'HKU:\\','')): $ppn" 'DIAG'
-                                        }
-                                    }
-                                }
-                            }
-                        # Pass 2 — offline profiles (not yet loaded into HKU)
-                        $usersRoot = if (Test-Path 'C:\Users') { 'C:\Users' } else {
-                            Split-Path (Split-Path ([Environment]::GetFolderPath('UserProfile')))
-                        }
-                        Get-ChildItem $usersRoot -Directory -ErrorAction SilentlyContinue |
-                            Where-Object { $_.Name -notin @('Public','Default','Default User','All Users') } |
-                            ForEach-Object {
-                                $ntuser = Join-Path $_.FullName 'NTUSER.DAT'
-                                if (-not (Test-Path $ntuser)) { return }
-                                $tag      = $_.Name -replace '[^\w]','_'
-                                $hiveReg  = "HKLM\__TmpHive_$tag"
-                                $hiveKey  = "HKLM:\__TmpHive_$tag"
-                                $null = & reg load $hiveReg "`"$ntuser`"" 2>&1
-                                if ($LASTEXITCODE -ne 0) { return }   # locked = user logged in; covered by Pass 1
-                                try {
-                                    $offMsi = "$hiveKey\SOFTWARE\Microsoft\Installer\Products"
-                                    if (Test-Path $offMsi) {
-                                        Get-ChildItem $offMsi -ErrorAction SilentlyContinue | ForEach-Object {
-                                            $pp  = Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue
-                                            $ppn = $null
-                                            try { if ($pp -and $pp.PSObject.Properties['ProductName']) { $ppn = $pp.ProductName } } catch { }
-                                            if ($ppn -and $ppn -like "*$pkgBaseName*") {
-                                                Remove-Item $_.PSPath -Recurse -Force -ErrorAction SilentlyContinue
-                                                Write-Log "  Removed offline per-user MSI product ($($_.Name)): $ppn" 'DIAG'
-                                            }
-                                        }
-                                    }
-                                } finally {
-                                    [GC]::Collect(); [GC]::WaitForPendingFinalizers()
-                                    & reg unload $hiveReg 2>&1 | Out-Null
-                                }
-                            }
-                    } catch {
-                        Write-Log "  Per-user MSI cleanup warning: $_" 'DIAG'
-                    }
-                    $p = Start-Process $tmpFile -ArgumentList $Pkg.DArgs -Wait -PassThru -NoNewWindow
-                    # If still 1638, the uninstall didn't fully clear it.
-                    # Find the existing install directory and add it to PATH — Python is
-                    # already functional, it just isn't on PATH.
-                    if ($p.ExitCode -eq 1638 -and $Pkg.ContainsKey('AltPaths')) {
-                        Write-Log "  Still 1638 after uninstall — scanning for existing install…" 'WARN'
-                        $altDir = $Pkg.AltPaths | Where-Object { Test-Path $_ } | Select-Object -First 1
-                        if ($altDir) {
-                            $mp = [System.Environment]::GetEnvironmentVariable('Path', 'Machine')
-                            if ($mp -notlike "*$altDir*") {
-                                [System.Environment]::SetEnvironmentVariable('Path', "$mp;$altDir", 'Machine')
-                                $env:Path = "$env:Path;$altDir"
-                                Write-Log "  Added existing install to machine PATH: $altDir" 'OK'
-                            } else {
-                                Write-Log "  Existing install already in PATH: $altDir" 'DIAG'
-                            }
-                            Write-Log "  Direct install OK (pre-existing): $($Pkg.Name)" 'OK'
-                            return $true
-                        }
-                    }
-                }
-                if ($p.ExitCode -notin @(0, 3010)) { throw "Exit code $($p.ExitCode)" }
-                # EXE installers (Python) may spawn child msiexec processes and exit before
-                # the actual installation completes.  If AltPaths are defined, poll until
-                # the expected executable appears (up to 90 s), then refresh session PATH.
-                if ($Pkg.ContainsKey('AltPaths') -and $Pkg['AltPaths']) {
-                    $deadline  = (Get-Date).AddSeconds(90)
-                    $foundDir  = $null
-                    while (-not $foundDir -and (Get-Date) -lt $deadline) {
-                        $foundDir = $Pkg.AltPaths | Where-Object { Test-Path "$_\python.exe" } | Select-Object -First 1
-                        if (-not $foundDir) { Start-Sleep -Seconds 5 }
-                    }
-                    if (-not $foundDir) {
-                        throw "Exit $($p.ExitCode) but python.exe not found at any AltPath after 90 s — child installer likely failed silently"
-                    }
-                    Write-Log "  python.exe confirmed at: $foundDir" 'DIAG'
-                    # Add both the Python root and Scripts\ so pip-installed tools
-                    # (e.g. keeper.exe) are immediately findable in this session.
-                    foreach ($addDir in @($foundDir, "$foundDir\Scripts")) {
-                        if ($env:Path -notlike "*$addDir*") {
-                            $env:Path = "$env:Path;$addDir"
-                            Write-Log "  Session PATH refreshed to include: $addDir" 'DIAG'
-                        }
-                    }
-                    # Smoke test — confirm the interpreter is actually functional before
-                    # proceeding to pip installs. A present-but-broken python.exe would
-                    # cause Keeper Commander to fail with a confusing error downstream.
-                    $pyVer = & "$foundDir\python.exe" --version 2>&1
-                    if ($LASTEXITCODE -eq 0) {
-                        Write-Log "  Python smoke test OK: $pyVer" 'OK'
-                    } else {
-                        throw "python.exe found at $foundDir but '--version' failed (exit $LASTEXITCODE) — install incomplete"
+
+                    if ($found) {
+                        Add-MachinePath $found
+                        Add-MachinePath (Join-Path $found 'Scripts')
                     }
                 }
             }
+
             'exe-args' {
-                # Args are passed as a single string to the EXE (e.g. Docker Desktop)
-                $p = Start-Process $tmpFile -ArgumentList $Pkg.DArgs -Wait -PassThru -NoNewWindow
-                if ($p.ExitCode -notin @(0, 3010)) { throw "Exit code $($p.ExitCode)" }
-            }
-            'msi' {
-                # msiexec.exe cannot resolve '..' in paths — resolve to full absolute path first.
-                $resolvedMsi = [System.IO.Path]::GetFullPath($tmpFile)
-                $p = Start-Process msiexec.exe -ArgumentList "/i `"$resolvedMsi`" $($Pkg.DArgs)" `
-                     -Wait -PassThru -NoNewWindow
-                if ($p.ExitCode -notin @(0, 3010)) { throw "msiexec exit $($p.ExitCode)" }
-            }
-            'msix' {
-                # Provision machine-wide so all users get the app on next logon.
-                # Add-AppxPackage (per-user) fails as SYSTEM; AppxProvisionedPackage works.
-                Add-AppxProvisionedPackage -Online -PackagePath $tmpFile `
-                    -SkipLicense -ErrorAction Stop | Out-Null
-            }
-            'zip-to-path' {
-                $dest = if ($Pkg.ZipDest) { $Pkg.ZipDest } else { 'C:\Program Files\ZipInstall' }
-                if (-not (Test-Path $dest)) { New-Item -ItemType Directory -Path $dest -Force | Out-Null }
-                Expand-Archive -Path $tmpFile -DestinationPath $dest -Force
-                # Add to machine PATH if not already present
-                $mp = [System.Environment]::GetEnvironmentVariable('Path', 'Machine')
-                if ($mp -notlike "*$dest*") {
-                    [System.Environment]::SetEnvironmentVariable('Path', "$mp;$dest", 'Machine')
-                    $env:Path = $env:Path + ";$dest"
+                $args = if ($Pkg.DArgs) { $Pkg.DArgs } else { '' }
+                $result = Invoke-Process -FilePath $tmpFile -ArgumentList @($args) -TimeoutSeconds 2400
+                if ($result.ExitCode -notin @(0,3010)) {
+                    throw "Exit code $($result.ExitCode)"
                 }
+            }
+
+            'msi' {
+                $resolved = [System.IO.Path]::GetFullPath($tmpFile)
+                $argString = "/i `"$resolved`" $($Pkg.DArgs)"
+                $result = Invoke-Process -FilePath 'msiexec.exe' -ArgumentList @($argString) -TimeoutSeconds 1800
+                if ($result.ExitCode -notin @(0,3010)) {
+                    throw "msiexec exit $($result.ExitCode)"
+                }
+            }
+
+            'msix' {
+                Add-AppxProvisionedPackage -Online -PackagePath $tmpFile -SkipLicense -ErrorAction Stop | Out-Null
+            }
+
+            'zip-to-path' {
+                $dest = if ($Pkg.ContainsKey('ZipDest') -and $Pkg.ZipDest) { $Pkg.ZipDest } else { 'C:\Program Files\ZipInstall' }
+                if (-not (Test-Path $dest)) {
+                    New-Item -ItemType Directory -Path $dest -Force | Out-Null
+                }
+                Expand-Archive -Path $tmpFile -DestinationPath $dest -Force
+                Add-MachinePath $dest
+
+                if ($Pkg.Name -eq 'nvm-windows') {
+                    Configure-NvmEnvironment -NvmDir $dest
+                }
+            }
+
+            default {
+                throw "Unsupported DType: $($Pkg.DType)"
             }
         }
+
+        Update-SessionPath
         Write-Log "  Direct install OK: $($Pkg.Name)" 'OK'
         return $true
     } catch {
-        Write-Log "  Direct install error: $_" 'FAIL'
+        Write-Log "  Direct install error: $_" 'WARN'
         return $false
     } finally {
-        # Never delete a bundled installer — it lives inside the zip and cannot be re-downloaded.
-        if (-not $isFromBundle) {
+        if (-not $isBundled -and $tmpFile -and (Test-Path $tmpFile)) {
             Remove-Item $tmpFile -Force -ErrorAction SilentlyContinue
         }
     }
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Package orchestrator — winget → Choco → direct
-# ─────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# nvm / Node
+# ---------------------------------------------------------------------------
+function Configure-NvmEnvironment {
+    param([Parameter(Mandatory)][string]$NvmDir)
+
+    if (-not (Test-Path $NvmDir)) {
+        New-Item -ItemType Directory -Path $NvmDir -Force | Out-Null
+    }
+
+    [System.Environment]::SetEnvironmentVariable('NVM_HOME', $NvmDir, 'Machine')
+    [System.Environment]::SetEnvironmentVariable('NVM_SYMLINK', $NvmSymlink, 'Machine')
+
+    $env:NVM_HOME = $NvmDir
+    $env:NVM_SYMLINK = $NvmSymlink
+
+    Add-MachinePath $NvmDir
+    Add-MachinePath $NvmSymlink
+
+    $settingsFile = Join-Path $NvmDir 'settings.txt'
+    @"
+root: $NvmDir
+path: $NvmSymlink
+arch: 64
+proxy: none
+"@ | Set-Content $settingsFile -Encoding UTF8
+
+    Write-Log "nvm settings written: $settingsFile" 'OK'
+    Update-SessionPath
+}
+
+function Test-NvmRequired {
+    $nvmExe = Join-Path $NvmHome 'nvm.exe'
+    if (-not (Test-Path $nvmExe)) {
+        return $false
+    }
+
+    Configure-NvmEnvironment -NvmDir $NvmHome
+
+    $out = & $nvmExe version 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Log "nvm.exe exists but failed to run: $($out -join ' ')" 'WARN'
+        return $false
+    }
+
+    Write-Log "nvm verified: $($out | Select-Object -First 1)" 'OK'
+    return $true
+}
+
+function Install-NodeThroughNvm {
+    $nvmExe = Join-Path $NvmHome 'nvm.exe'
+
+    if (-not (Test-NvmRequired)) {
+        Add-InstallError 'nvm-windows is required but is not installed or not functional. Cannot install Node/Claude stack.'
+        return $false
+    }
+
+    Write-Log 'Installing Node.js LTS via nvm.' 'INFO'
+
+    $install = Invoke-Process -FilePath $nvmExe -ArgumentList @('install','lts') -TimeoutSeconds 1200 -Label 'nvm'
+    if ($install.ExitCode -ne 0) {
+        Add-InstallError "nvm install lts failed. $($install.Output)"
+        return $false
+    }
+
+    $use = Invoke-Process -FilePath $nvmExe -ArgumentList @('use','lts') -TimeoutSeconds 300 -Label 'nvm'
+    if ($use.ExitCode -ne 0) {
+        Add-InstallError "nvm use lts failed. $($use.Output)"
+        return $false
+    }
+
+    Update-SessionPath
+    Add-MachinePath $NvmSymlink
+
+    $nodeExe = Join-Path $NvmSymlink 'node.exe'
+    $npmCmd  = Join-Path $NvmSymlink 'npm.cmd'
+
+    if (-not (Test-Path $nodeExe)) {
+        Add-InstallError "nvm completed but node.exe was not found at $nodeExe."
+        return $false
+    }
+
+    if (-not (Test-Path $npmCmd)) {
+        Add-InstallError "nvm completed but npm.cmd was not found at $npmCmd."
+        return $false
+    }
+
+    $nodeVer = & $nodeExe --version 2>&1
+    $npmVer  = & $npmCmd --version 2>&1
+
+    Write-Log "Node.js installed via nvm: $nodeVer" 'OK'
+    Write-Log "npm available via nvm: $npmVer" 'OK'
+
+    return $true
+}
+
+# ---------------------------------------------------------------------------
+# Package orchestrator
+# ---------------------------------------------------------------------------
 function Install-Package {
     param([hashtable]$Pkg)
 
-    # Role filter
     $inRole = $Role -eq 'All' -or 'All' -in $Pkg.Roles -or $Role -in $Pkg.Roles
     if (-not $inRole) {
-        Write-Log "Skip '$($Pkg.Name)' (not in role '$Role')." 'DIAG'
+        Write-Log "Skip '$($Pkg.Name)' for role '$Role'." 'DIAG'
         return
     }
 
@@ -1080,29 +939,51 @@ function Install-Package {
         Success   = $false
     }
 
-    # Pre-check: if VerifyCmd is defined and the tool is already functional, skip install entirely.
-    # Handles cases where the tool was installed manually or by a prior run that left it working.
-    # Use ContainsKey to avoid StrictMode throwing on packages that don't define this property.
-    $preCheckCmd = if ($Pkg.ContainsKey('VerifyCmd')) { $Pkg['VerifyCmd'] } else { $null }
-    if ($preCheckCmd -and (Get-Command $preCheckCmd -ErrorAction SilentlyContinue)) {
-        $existVer = try { (& $preCheckCmd '--version' 2>&1 | Select-Object -First 1) -replace '\s+$','' } catch { 'present' }
-        Write-Log "  $($Pkg.Name) already installed ($existVer) — skipping." 'OK'
-        $entry.Method  = 'pre-existing'
-        $entry.Success = $true
-        $Manifest.Packages.Add($entry)
-        Save-Manifest
-        return
+    $verifyCmd = if ($Pkg.ContainsKey('VerifyCmd')) { $Pkg.VerifyCmd } else { $null }
+    $fallbacks = if ($Pkg.ContainsKey('FallbackExes')) { $Pkg.FallbackExes } else { @() }
+    $verifyExe = if ($Pkg.ContainsKey('VerifyExe')) { $Pkg.VerifyExe } else { $null }
+
+    if ($verifyExe -and (Test-Path $verifyExe)) {
+        if ($Pkg.Name -eq 'nvm-windows') {
+            if (Test-NvmRequired) {
+                Write-Log "  $($Pkg.Name) already installed and functional at $verifyExe. Skipping." 'OK'
+                $entry.Method = 'pre-existing'
+                $entry.Success = $true
+                $Manifest.Packages.Add($entry)
+                Save-Manifest
+                return
+            }
+        } else {
+            Write-Log "  $($Pkg.Name) already installed at $verifyExe. Skipping." 'OK'
+            $entry.Method = 'pre-existing'
+            $entry.Success = $true
+            $Manifest.Packages.Add($entry)
+            Save-Manifest
+            return
+        }
     }
 
-    # Pre-check for MSIX/AppX packages: skip if already provisioned machine-wide.
-    $preCheckAppx = if ($Pkg.ContainsKey('VerifyAppx')) { $Pkg['VerifyAppx'] } else { $null }
-    if ($preCheckAppx) {
-        $appxPkg = Get-AppxProvisionedPackage -Online -ErrorAction SilentlyContinue |
-                   Where-Object { $_.DisplayName -like $preCheckAppx } |
-                   Select-Object -First 1
-        if ($appxPkg) {
-            Write-Log "  $($Pkg.Name) already provisioned ($($appxPkg.Version)) — skipping." 'OK'
-            $entry.Method  = 'pre-existing'
+    if ($verifyCmd -and $Pkg.Name -ne 'nvm-windows') {
+        $found = Test-CommandAvailable -Command $verifyCmd -FallbackExes $fallbacks
+        if ($found) {
+            $ver = try { (& $found --version 2>&1 | Select-Object -First 1) -replace '\s+$','' } catch { 'present' }
+            Write-Log "  $($Pkg.Name) already installed ($ver). Skipping." 'OK'
+            $entry.Method = 'pre-existing'
+            $entry.Success = $true
+            $Manifest.Packages.Add($entry)
+            Save-Manifest
+            return
+        }
+    }
+
+    if ($Pkg.ContainsKey('VerifyAppx') -and $Pkg.VerifyAppx) {
+        $appx = Get-AppxProvisionedPackage -Online -ErrorAction SilentlyContinue |
+            Where-Object { $_.DisplayName -like $Pkg.VerifyAppx } |
+            Select-Object -First 1
+
+        if ($appx) {
+            Write-Log "  $($Pkg.Name) already provisioned ($($appx.Version)). Skipping." 'OK'
+            $entry.Method = 'pre-existing'
             $entry.Success = $true
             $Manifest.Packages.Add($entry)
             Save-Manifest
@@ -1111,287 +992,115 @@ function Install-Package {
     }
 
     if ($RunningAsSystem) {
-        # SYSTEM context (NinjaOne): Bundled → Chocolatey → Direct → winget (last resort)
-        # winget has UWP/COM limitations as SYSTEM; Chocolatey is purpose-built for headless installs.
-
-        # Tier 0 — bundled installer (Package-Release.ps1 pre-downloads into bundled\ inside the zip)
-        # If the file is already in the zip, skip Choco entirely — no network and no Choco overhead.
-        $bundledExt  = switch ($Pkg.DType) {
-            'msi'         { '.msi' }
-            'zip-to-path' { '.zip' }
-            'msix'        { '.msix' }
-            default       { '.exe' }
-        }
-        $bundledPath = Join-Path $PSScriptRoot "..\bundled\ME_$($Pkg.Name -replace '[^\w]','_')$bundledExt"
-        if (-not $entry.Success -and (Test-Path $bundledPath)) {
-            Write-Log "  Tier 0 (bundled) — skipping Choco: $bundledPath" 'DIAG'
+        if (-not $entry.Success -and (Test-Path (Get-BundledPath $Pkg))) {
             if (Install-ViaDirectDownload $Pkg) {
-                $entry.Method  = 'bundled'
+                $entry.Method = 'bundled'
                 $entry.Success = $true
             }
         }
 
-        # Tier 1 — Chocolatey
+        if (-not $entry.Success) {
+            if (Install-ViaDirectDownload $Pkg) {
+                $entry.Method = 'direct'
+                $entry.Success = $true
+            }
+        }
+
         if (-not $entry.Success) {
             if (Install-ViaChocolatey $Pkg) {
-                $entry.Method  = 'choco'
+                $entry.Method = 'choco'
                 $entry.Success = $true
             }
         }
 
-        # Tier 2 — direct download
         if (-not $entry.Success) {
-            if (Install-ViaDirectDownload $Pkg) {
-                $entry.Method  = 'direct'
+            if (Install-ViaWinget $Pkg) {
+                $entry.Method = 'winget'
                 $entry.Success = $true
-            }
-        }
-
-        # Tier 3 — winget (last resort; some packages only have a winget entry)
-        if (-not $entry.Success) {
-            if (Ensure-Winget) {
-                if (Install-ViaWinget $Pkg) {
-                    $entry.Method  = 'winget'
-                    $entry.Success = $true
-                }
             }
         }
     } else {
-        # Interactive context: winget → Chocolatey → Direct
-        Write-Log "  Running interactively — using winget → Chocolatey → Direct." 'DIAG'
-
-        # Tier 1 — winget
-        if (Ensure-Winget) {
-            if (Install-ViaWinget $Pkg) {
-                $entry.Method  = 'winget'
-                $entry.Success = $true
-            }
-        }
-
-        # Tier 2 — Chocolatey
         if (-not $entry.Success) {
-            if (Install-ViaChocolatey $Pkg) {
-                $entry.Method  = 'choco'
+            if (Install-ViaWinget $Pkg) {
+                $entry.Method = 'winget'
                 $entry.Success = $true
             }
         }
 
-        # Tier 3 — direct download
+        if (-not $entry.Success -and (Test-Path (Get-BundledPath $Pkg))) {
+            if (Install-ViaDirectDownload $Pkg) {
+                $entry.Method = 'bundled'
+                $entry.Success = $true
+            }
+        }
+
         if (-not $entry.Success) {
             if (Install-ViaDirectDownload $Pkg) {
-                $entry.Method  = 'direct'
+                $entry.Method = 'direct'
+                $entry.Success = $true
+            }
+        }
+
+        if (-not $entry.Success) {
+            if (Install-ViaChocolatey $Pkg) {
+                $entry.Method = 'choco'
                 $entry.Success = $true
             }
         }
     }
 
+    if ($entry.Success -and $verifyExe -and -not (Test-Path $verifyExe)) {
+        Write-Log "  $($Pkg.Name) reported success but required exe is missing: $verifyExe" 'WARN'
+        $entry.Success = $false
+    }
+
+    if ($entry.Success -and $Pkg.Name -eq 'nvm-windows') {
+        if (-not (Test-NvmRequired)) {
+            Write-Log '  nvm install reported success but nvm verification failed.' 'WARN'
+            $entry.Success = $false
+        }
+    }
+
     if (-not $entry.Success) {
-        $msg = "FAILED to install '$($Pkg.Name)' via all available methods."
-        Write-Log $msg 'FAIL'
-        $Manifest.Errors.Add($msg)
+        Add-InstallError "FAILED to install '$($Pkg.Name)' via all available methods."
     }
 
     $Manifest.Packages.Add($entry)
     Save-Manifest
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Claude Code — special handling (nvm + Node + npm global)
-# ─────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Claude Code
+# ---------------------------------------------------------------------------
 function Install-ClaudeCode {
     Write-Log '=== Claude Code ===' 'INFO'
 
-    # Refresh PATH so newly installed tools are visible
-    Update-SessionPath
-
-    # Diagnostic snapshot before any fixup
-    Write-Log "  NVM_HOME (machine): $([System.Environment]::GetEnvironmentVariable('NVM_HOME','Machine'))" 'DIAG'
-    Write-Log "  NVM_HOME (user):    $([System.Environment]::GetEnvironmentVariable('NVM_HOME','User'))" 'DIAG'
-    Write-Log "  PATH nvm/node: $(($env:Path -split ';' | Where-Object { $_ -match 'nvm|node' }) -join ', ')" 'DIAG'
-
-    # ── Locate nvm.exe by direct file-system scan ─────────────────────────────
-    # Get-Command caches results from before $env:Path was mutated, so it can
-    # return false even when nvm.exe is present on PATH.  Scanning directly is
-    # reliable regardless of cache state.
-    $nvmExe     = $null
-    $nvmDir     = $null
-    $nvmSymlink = 'C:\Program Files\nodejs'
-
-    $chocoLib = [System.Environment]::GetEnvironmentVariable('ChocolateyInstall', 'Machine')
-    if (-not $chocoLib) { $chocoLib = 'C:\ProgramData\chocolatey' }
-
-    $nvmCandidates = @(
-        $env:NVM_HOME,
-        [System.Environment]::GetEnvironmentVariable('NVM_HOME', 'Machine'),
-        'C:\ProgramData\nvm',
-        'C:\nvm4w', 'C:\nvm', 'C:\tools\nvm',
-        'C:\Windows\System32\config\systemprofile\AppData\Roaming\nvm',
-        "$env:APPDATA\nvm", "$env:LOCALAPPDATA\nvm",
-        (Join-Path $chocoLib 'lib\nvm\tools'),
-        (Join-Path $chocoLib 'lib\nvm.portable\tools')
-    )
-    # Also scan every PATH entry that looks nvm-related
-    $nvmCandidates += ($env:Path -split ';') | Where-Object { $_ -match 'nvm' }
-
-    foreach ($c in ($nvmCandidates | Where-Object { $_ } | Select-Object -Unique)) {
-        if (Test-Path (Join-Path $c 'nvm.exe')) {
-            $nvmExe = Join-Path $c 'nvm.exe'
-            $nvmDir = $c
-            Write-Log "  nvm.exe found at: $nvmExe" 'DIAG'
-            break
-        }
-    }
-
-    # ── Configure nvm environment (NVM_HOME, NVM_SYMLINK, PATH, settings.txt) ──
-    if ($nvmExe) {
-        # NVM_HOME
-        if (-not [System.Environment]::GetEnvironmentVariable('NVM_HOME', 'Machine')) {
-            [System.Environment]::SetEnvironmentVariable('NVM_HOME', $nvmDir, 'Machine')
-            Write-Log "  NVM_HOME written to machine registry: $nvmDir" 'OK'
-        }
-        $env:NVM_HOME = $nvmDir
-
-        # NVM_SYMLINK
-        if (-not [System.Environment]::GetEnvironmentVariable('NVM_SYMLINK', 'Machine')) {
-            [System.Environment]::SetEnvironmentVariable('NVM_SYMLINK', $nvmSymlink, 'Machine')
-            Write-Log "  NVM_SYMLINK written to machine registry: $nvmSymlink" 'OK'
-        }
-        $env:NVM_SYMLINK = $nvmSymlink
-
-        # Ensure both the nvm dir and the nodejs symlink dir are on machine PATH and session PATH
-        foreach ($addPath in @($nvmDir, $nvmSymlink)) {
-            $mp = [System.Environment]::GetEnvironmentVariable('Path', 'Machine')
-            if ($mp -notlike "*$addPath*") {
-                [System.Environment]::SetEnvironmentVariable('Path', "$mp;$addPath", 'Machine')
-                Write-Log "  Added to machine PATH: $addPath" 'OK'
-            }
-            if ($env:Path -notlike "*$addPath*") { $env:Path = "$env:Path;$addPath" }
-        }
-
-        # settings.txt — required by nvm-noinstall.zip; nvm refuses to run without it
-        $settingsFile = Join-Path $nvmDir 'settings.txt'
-        if (-not (Test-Path $settingsFile)) {
-            @"
-root: $nvmDir
-path: $nvmSymlink
-arch: 64
-proxy: none
-"@ | Set-Content $settingsFile -Encoding UTF8
-            Write-Log "  nvm settings.txt created at $settingsFile" 'OK'
-        } else {
-            Write-Log "  nvm settings.txt exists at $settingsFile" 'DIAG'
-        }
-    } else {
-        Write-Log '  nvm.exe not found — will try fallback Node.js installers.' 'WARN'
-    }
-
-    # ── Install Node.js LTS — three tiers: nvm → Chocolatey → direct MSI ──────
-    $nodeOk = (Get-Command node -ErrorAction SilentlyContinue) -ne $null
-    if ($nodeOk) {
-        Write-Log "  Node.js already present: $(& node --version 2>&1)" 'DIAG'
-    }
-
-    # Tier 1 — direct Node.js LTS MSI from nodejs.org (machine-wide, all users inherit from PATH)
-    if (-not $nodeOk) {
-        Write-Log '  Installing Node.js LTS via MSI (machine-wide)…' 'DIAG'
-        try {
-            $index  = Invoke-RestMethod 'https://nodejs.org/dist/index.json' -UseBasicParsing
-            $ltsRel = $index | Where-Object { $_.lts -and $_.lts -ne $false } | Select-Object -First 1
-            $ver    = $ltsRel.version    # e.g. "v22.14.0"
-            $url    = "https://nodejs.org/dist/$ver/node-$ver-x64.msi"
-            $tmp    = Join-Path $env:TEMP 'ME_nodejs_lts.msi'
-            Write-Log "  Downloading Node.js $ver from nodejs.org…" 'DIAG'
-            Invoke-Download $url $tmp
-            $p = Start-Process msiexec.exe `
-                     -ArgumentList "/i `"$tmp`" /quiet /norestart ADDLOCAL=ALL" `
-                     -Wait -PassThru -NoNewWindow
-            Remove-Item $tmp -Force -ErrorAction SilentlyContinue
-            if ($p.ExitCode -in @(0, 3010)) {
-                Write-Log '  Node.js MSI install OK.' 'OK'
-                Update-SessionPath
-                if (Get-Command node -ErrorAction SilentlyContinue) {
-                    $nodeOk = $true
-                    Write-Log "  Node.js installed via MSI: $(& node --version 2>&1)" 'OK'
-                }
-            } else {
-                Write-Log "  Node.js MSI exited $($p.ExitCode) — trying next tier." 'WARN'
-            }
-        } catch {
-            Write-Log "  Direct Node.js MSI failed: $_ — trying next tier." 'WARN'
-        }
-    }
-
-    # Tier 2 — nvm install lts (nvm is machine-wide via C:\ProgramData\nvm)
-    if (-not $nodeOk -and $nvmExe) {
-        Write-Log '  Installing Node.js LTS via nvm…' 'DIAG'
-        & $nvmExe install lts 2>&1 | ForEach-Object { Write-Log "    [nvm] $_" 'DIAG' }
-        & $nvmExe use lts     2>&1 | ForEach-Object { Write-Log "    [nvm] $_" 'DIAG' }
-        Update-SessionPath
-        # nvm symlink is NVM_SYMLINK (C:\Program Files\nodejs) — set by Install-ClaudeCode above
-        $nvmNodePath = [System.Environment]::GetEnvironmentVariable('NVM_SYMLINK', 'Machine')
-        if ($nvmNodePath -and (Test-Path (Join-Path $nvmNodePath 'node.exe'))) {
-            if ($env:Path -notlike "*$nvmNodePath*") { $env:Path = "$env:Path;$nvmNodePath" }
-            $nodeOk = $true
-            $nodeVer = try { & (Join-Path $nvmNodePath 'node.exe') --version 2>&1 } catch { 'unknown' }
-            Write-Log "  Node.js installed via nvm: $nodeVer" 'OK'
-        } elseif (Get-Command node -ErrorAction SilentlyContinue) {
-            $nodeOk = $true
-            Write-Log "  Node.js installed via nvm: $(& node --version 2>&1)" 'OK'
-        } else {
-            Write-Log '  nvm install did not produce a usable node — trying next tier.' 'WARN'
-        }
-    }
-
-    # Tier 3 — Chocolatey nodejs-lts
-    if (-not $nodeOk) {
-        Write-Log '  Trying Chocolatey nodejs-lts…' 'WARN'
-        if (Ensure-Chocolatey) {
-            $out = & choco upgrade nodejs-lts --yes --no-progress 2>&1
-            $raw = ($out -join "`n")
-            if ($LASTEXITCODE -eq 0 -or $raw -match '(?i)already installed|is the latest version') {
-                Write-Log '  Chocolatey nodejs-lts OK.' 'OK'
-                Update-SessionPath
-                $chocoNodeDir = @('C:\tools\nodejs', 'C:\ProgramData\chocolatey\bin') |
-                    Where-Object { Test-Path (Join-Path $_ 'node.exe') } | Select-Object -First 1
-                if (Get-Command node -ErrorAction SilentlyContinue) {
-                    $nodeOk = $true
-                    Write-Log "  Node.js installed via Chocolatey: $(& node --version 2>&1)" 'OK'
-                } elseif ($chocoNodeDir) {
-                    if ($env:Path -notlike "*$chocoNodeDir*") { $env:Path = "$env:Path;$chocoNodeDir" }
-                    $mp = [System.Environment]::GetEnvironmentVariable('Path', 'Machine')
-                    if ($mp -notlike "*$chocoNodeDir*") {
-                        [System.Environment]::SetEnvironmentVariable('Path', "$mp;$chocoNodeDir", 'Machine')
-                    }
-                    $nodeOk = $true
-                    $nodeVer = try { & (Join-Path $chocoNodeDir 'node.exe') --version 2>&1 } catch { 'unknown' }
-                    Write-Log "  Node.js found via Chocolatey path probe: $nodeVer" 'OK'
-                }
-            } else {
-                Write-Log "  Chocolatey nodejs-lts failed (exit $LASTEXITCODE): $raw" 'WARN'
-            }
-        }
-    }
-
-    if (-not $nodeOk) {
-        $msg = 'Node.js unavailable after all install attempts — cannot install Claude Code.'
-        Write-Log $msg 'FAIL'
-        $Manifest.Errors.Add($msg)
+    if (-not (Install-NodeThroughNvm)) {
+        Add-InstallError 'Claude Code was not installed because required nvm/Node setup failed.'
         return
     }
 
-    # ── Remove broken winget Claude stub unconditionally ─────────────────────
-    # The Anthropic.ClaudeCode winget package creates a stub exe that throws
-    # "No application associated" on launch.  Remove it before npm install so
-    # it cannot shadow the npm-installed binary on PATH.  Do this regardless of
-    # whether Get-Command finds claude — the stub itself satisfies Get-Command.
-    $wingetStub = 'C:\Program Files\WinGet\Links\claude.exe'
-    if (Test-Path $wingetStub) {
-        Write-Log '  Removing broken winget Claude stub before npm install…' 'DIAG'
-        & winget uninstall --id Anthropic.ClaudeCode --silent 2>&1 | Out-Null
-        if (Test-Path $wingetStub) { Remove-Item $wingetStub -Force -ErrorAction SilentlyContinue }
+    Update-SessionPath
+
+    $nodeExe = Join-Path $NvmSymlink 'node.exe'
+    $npmExe  = Join-Path $NvmSymlink 'npm.cmd'
+
+    if (-not (Test-Path $nodeExe)) {
+        Add-InstallError "node.exe missing at required nvm symlink path: $nodeExe"
+        return
     }
 
-    # ── Install Claude Code via npm ───────────────────────────────────────────
+    if (-not (Test-Path $npmExe)) {
+        Add-InstallError "npm.cmd missing at required nvm symlink path: $npmExe"
+        return
+    }
+
+    if (-not (Test-Path $NpmPrefix)) {
+        New-Item -ItemType Directory -Path $NpmPrefix -Force | Out-Null
+    }
+
+    Add-MachinePath $NpmPrefix
+
     $entry = [ordered]@{
         Name      = 'Claude Code'
         Timestamp = (Get-Date -Format 'o')
@@ -1402,163 +1111,71 @@ proxy: none
         Success   = $false
     }
 
-    # Always install to a fixed machine-wide prefix so claude lands in the same
-    # place whether this script runs as SYSTEM (NinjaOne) or as an interactive
-    # admin.  A user-roaming npm prefix in machine PATH is fragile and breaks
-    # for other users whose sessions predate the PATH update.
-    $claudeNpmPrefix = 'C:\ProgramData\npm'
-    if (-not (Test-Path $claudeNpmPrefix)) {
-        New-Item -ItemType Directory -Path $claudeNpmPrefix -Force | Out-Null
-        Write-Log "  Created machine-wide npm prefix: $claudeNpmPrefix" 'DIAG'
+    $wingetStub = 'C:\Program Files\WinGet\Links\claude.exe'
+    if (Test-Path $wingetStub) {
+        Write-Log '  Removing broken winget Claude stub.' 'DIAG'
+        Remove-Item $wingetStub -Force -ErrorAction SilentlyContinue
     }
 
-    # ── Skip if Claude Code is already installed and functional ───────────────
-    # Check the machine-wide prefix binary first (our preferred location).
-    # If not there, probe PATH — but only skip if claude actually responds to
-    # --version.  A broken binary that throws must still be repaired.
-    # Run the check in a background job so a hung or missing exe can't crash
-    # this script (ErrorActionPreference = Stop is active in the outer scope).
-    $claudePrefixBin = Join-Path $claudeNpmPrefix 'node_modules\@anthropic-ai\claude-code\bin\claude.exe'
-    $alreadyAtPrefix = Test-Path $claudePrefixBin
-    if (-not $alreadyAtPrefix) {
-        $existingCmd = Get-Command claude -ErrorAction SilentlyContinue
-        if ($existingCmd) {
-            Write-Log "  claude found on PATH at $($existingCmd.Source) — verifying it works…" 'DIAG'
-            $testVer = try {
-                $job = Start-Job -ScriptBlock { & claude --version 2>&1 | Select-Object -First 1 }
-                $result = $null
-                if ($job | Wait-Job -Timeout 8) { $result = (Receive-Job $job) -join '' }
-                Remove-Job $job -Force -ErrorAction SilentlyContinue
-                $result
-            } catch { $null }
+    for ($i = 1; $i -le $MaxRetries; $i++) {
+        Write-Log "  Installing Claude Code via npm attempt $i." 'DIAG'
 
-            if ($testVer -match '\d') {
-                Write-Log "  Claude Code already installed and functional ($testVer) — skipping npm install." 'OK'
+        $prev = $ErrorActionPreference
+        $ErrorActionPreference = 'SilentlyContinue'
+        $out = & $npmExe install -g '--prefix' $NpmPrefix '@anthropic-ai/claude-code' --loglevel=error 2>&1
+        $npmExit = $LASTEXITCODE
+        $ErrorActionPreference = $prev
+
+        if ($npmExit -eq 0) {
+            Add-MachinePath $NpmPrefix
+            Update-SessionPath
+
+            $claudeCmd = Test-CommandAvailable -Command 'claude.cmd' -FallbackExes @(
+                'C:\ProgramData\npm\claude.cmd'
+            )
+
+            if ($claudeCmd) {
+                $ver = try { (& $claudeCmd --version 2>&1 | Select-Object -First 1) -replace '\s+$','' } catch { 'installed' }
+                Write-Log "  Claude Code installed: $ver" 'OK'
                 $entry.Success = $true
-                $Manifest.Packages.Add($entry)
-                Save-Manifest
-                return
+                break
+            }
+
+            Write-Log '  npm succeeded but claude.cmd was not found.' 'WARN'
+        } else {
+            $raw = $out -join "`n"
+            Write-Log "  npm failed attempt $i. $raw" 'WARN'
+            if ($raw -match '(?i)ECONNRESET|ETIMEDOUT|network') {
+                Start-Sleep -Seconds 15
             } else {
-                Write-Log "  claude found on PATH but not functional ($testVer) — will reinstall." 'WARN'
+                Start-Sleep -Seconds 5
             }
         }
     }
 
-    for ($i = 1; $i -le $MaxRetries; $i++) {
-        $action = if ($alreadyAtPrefix -or (Test-Path (Join-Path $claudeNpmPrefix 'claude.cmd'))) { 'Upgrading' } else { 'Installing' }
-        Write-Log "  $action Claude Code via npm (attempt $i)…" 'DIAG'
-        $prevEap = $ErrorActionPreference
-        $ErrorActionPreference = 'SilentlyContinue'
-        $out = & npm install -g '--prefix' $claudeNpmPrefix '@anthropic-ai/claude-code' --loglevel=error 2>&1
-        $ErrorActionPreference = $prevEap
-        if ($LASTEXITCODE -eq 0) {
-            if ($env:Path -notlike "*$claudeNpmPrefix*") { $env:Path = "$env:Path;$claudeNpmPrefix" }
-            Update-SessionPath
-            $claudeCmd = Get-Command claude -ErrorAction SilentlyContinue
-            $ver = try {
-                if ($claudeCmd) {
-                    $job = Start-Job -ScriptBlock { & claude --version 2>&1 | Select-Object -First 1 }
-                    $r = $null
-                    if ($job | Wait-Job -Timeout 8) { $r = (Receive-Job $job) -join '' }
-                    Remove-Job $job -Force -ErrorAction SilentlyContinue
-                    if ($r) { $r } else { 'installed (version check timed out)' }
-                } else { 'installed (PATH refresh required)' }
-            } catch { 'installed (check error)' }
-            Write-Log "  Claude Code installed/updated ($ver)." 'OK'
-            $entry.Success = $true
-            break
-        }
-        $raw = ($out -join "`n")
-        Write-Log "  npm error (attempt $i): $raw" 'WARN'
-        if ($raw -match '(?i)ECONNRESET|ETIMEDOUT|network') { Start-Sleep -Seconds 15 }
-        elseif ($i -lt $MaxRetries) { Start-Sleep -Seconds 5 }
-    }
-
-    # ── Add machine-wide claude prefix to machine PATH ────────────────────────
-    if ($entry.Success) {
-        $mp = [System.Environment]::GetEnvironmentVariable('Path', 'Machine')
-        if ($mp -notlike "*$claudeNpmPrefix*") {
-            [System.Environment]::SetEnvironmentVariable('Path', "$mp;$claudeNpmPrefix", 'Machine')
-            Write-Log "  Claude global bin added to machine PATH: $claudeNpmPrefix" 'OK'
-            $env:Path = "$env:Path;$claudeNpmPrefix"
-        } else {
-            Write-Log "  Claude global bin already in machine PATH: $claudeNpmPrefix" 'DIAG'
-        }
-    }
-
     if (-not $entry.Success) {
-        $msg = 'FAILED to install Claude Code.'
-        Write-Log $msg 'FAIL'
-        $Manifest.Errors.Add($msg)
+        Add-InstallError 'FAILED to install Claude Code.'
     }
 
     $Manifest.Packages.Add($entry)
     Save-Manifest
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Chatbot deployment — copies files, runs npm install, stores API key
-# ─────────────────────────────────────────────────────────────────────────────
-function Deploy-SetupChatbot {
-    Write-Log '=== Deploying Setup Guide Chatbot ===' 'INFO'
-
-    $chatbotSrc  = Join-Path $PSScriptRoot '..\chatbot'
-    $chatbotDest = Join-Path $SetupDir 'chatbot'
-    $launcherSrc = Join-Path $PSScriptRoot '..\chatbot\Start-DevSetupGuide.cmd'
-
-    # Copy chatbot source to persistent setup directory
-    if (Test-Path $chatbotSrc) {
-        if (-not (Test-Path $chatbotDest)) { New-Item -ItemType Directory $chatbotDest -Force | Out-Null }
-        Copy-Item "$chatbotSrc\*" $chatbotDest -Recurse -Force
-        Write-Log "Chatbot files copied to $chatbotDest" 'DIAG'
-    } else {
-        Write-Log 'Chatbot source directory not found alongside installer — skipping chatbot deploy.' 'WARN'
-        return
-    }
-
-    # Run npm install so all dependencies are ready before any user runs the chatbot
-    Update-SessionPath
-    if (Get-Command npm -ErrorAction SilentlyContinue) {
-        Write-Log '  Running npm install for chatbot…' 'DIAG'
-        Push-Location $chatbotDest
-        try {
-            # --loglevel=error suppresses npm notices that go to stderr.
-            # SilentlyContinue prevents PS5.1 from treating stderr as a terminating error.
-            $prevEap = $ErrorActionPreference
-            $ErrorActionPreference = 'SilentlyContinue'
-            $out = & npm install --no-fund --no-audit --loglevel=error 2>&1
-            $ErrorActionPreference = $prevEap
-            if ($LASTEXITCODE -eq 0) {
-                Write-Log '  Chatbot dependencies installed.' 'OK'
-            } else {
-                Write-Log "  npm install warning (exit $LASTEXITCODE): $($out -join ' ')" 'WARN'
-            }
-        } finally {
-            Pop-Location
-        }
-    } else {
-        Write-Log '  npm not available — chatbot dependencies will be installed on first run.' 'WARN'
-    }
-
-    # Store Anthropic API key as a machine-level environment variable
-    # so every user account on this machine can run the chatbot without
-    # any additional configuration.
-    if ($AnthropicApiKey -and $AnthropicApiKey -ne '') {
-        [System.Environment]::SetEnvironmentVariable('ANTHROPIC_API_KEY', $AnthropicApiKey, 'Machine')
-        $env:ANTHROPIC_API_KEY = $AnthropicApiKey
-        Write-Log 'ANTHROPIC_API_KEY stored as machine-level environment variable.' 'OK'
-    } else {
-        Write-Log 'No -AnthropicApiKey provided. Set ANTHROPIC_API_KEY manually before running the chatbot.' 'WARN'
-    }
-
-    Write-Log 'Chatbot deployment complete.' 'OK'
-}
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Multi-user: enumerate real human profiles
-# ─────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# User profile configuration
+# ---------------------------------------------------------------------------
 function Get-HumanUserProfiles {
-    $skip = @('systemprofile','LocalService','NetworkService','defaultuser0','Default','All Users','Public')
+    $skip = @(
+        'systemprofile',
+        'LocalService',
+        'NetworkService',
+        'defaultuser0',
+        'Default',
+        'Default User',
+        'All Users',
+        'Public'
+    )
+
     Get-ChildItem 'C:\Users' -Directory -ErrorAction SilentlyContinue |
         Where-Object {
             $_.Name -notin $skip -and
@@ -1567,352 +1184,327 @@ function Get-HumanUserProfiles {
         Select-Object -ExpandProperty FullName
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Multi-user: configure existing profiles from SYSTEM context
-# ─────────────────────────────────────────────────────────────────────────────
 function Configure-ExistingProfiles {
     if (-not (Test-Path $ConfigScript)) {
-        Write-Log 'Configure-UserEnvironment.ps1 not found — skipping profile configuration.' 'WARN'
+        Add-InstallWarning 'Configure-UserEnvironment.ps1 not found. Skipping existing profile configuration.'
         return
     }
 
-    $profiles = Get-HumanUserProfiles
-    if (-not $profiles) {
+    $profiles = @(Get-HumanUserProfiles)
+    if ($profiles.Count -eq 0) {
         Write-Log 'No existing human user profiles found.' 'DIAG'
         return
     }
 
-    # Launch all profile configs in parallel — ~74 s vs. 13 min sequential.
-    $jobMap = [System.Collections.Generic.List[object]]::new()
-    foreach ($prof in $profiles) {
-        $uname = Split-Path $prof -Leaf
-        Write-Log "Starting parallel config for: $uname ($prof)" 'INFO'
-        $job = Start-Job -ScriptBlock {
-            param($script, $prof, $dir)
-            & powershell.exe -NonInteractive -NoProfile -ExecutionPolicy Bypass `
-                -File $script -UserProfile $prof -SetupDir $dir 2>&1
-        } -ArgumentList $ConfigScript, $prof, $SetupDir
-        $jobMap.Add([pscustomobject]@{ Job = $job; Name = $uname })
-    }
+    $maxParallel = 3
+    $queue = [System.Collections.Queue]::new()
+    foreach ($p in $profiles) { $queue.Enqueue($p) }
 
-    # Collect output — overall cap: 15 minutes (same as the scheduled task limit).
-    $deadline = (Get-Date).AddMinutes(15)
-    foreach ($item in $jobMap) {
-        $remaining = [int][Math]::Max(1, ($deadline - (Get-Date)).TotalSeconds)
-        $item.Job | Wait-Job -Timeout $remaining | Out-Null
-        try {
-            Receive-Job $item.Job | ForEach-Object { Write-Log "  [$($item.Name)] $_" 'DIAG' }
-        } catch {
-            Write-Log "  Failed to collect output for $($item.Name): $_" 'WARN'
+    $running = [System.Collections.Generic.List[object]]::new()
+
+    while ($queue.Count -gt 0 -or $running.Count -gt 0) {
+        while ($queue.Count -gt 0 -and $running.Count -lt $maxParallel) {
+            $prof = [string]$queue.Dequeue()
+            $uname = Split-Path $prof -Leaf
+
+            Write-Log "Starting config for: $uname ($prof)" 'INFO'
+
+            $job = Start-Job -ScriptBlock {
+                param($script, $profilePath, $setupDir)
+                & powershell.exe -NonInteractive -NoProfile -ExecutionPolicy Bypass `
+                    -File $script -UserProfile $profilePath -SetupDir $setupDir 2>&1
+            } -ArgumentList $ConfigScript, $prof, $SetupDir
+
+            $running.Add([pscustomobject]@{
+                Job = $job
+                Name = $uname
+                Start = Get-Date
+            })
         }
-        if ($item.Job.State -ne 'Completed') {
-            Write-Log "  Config job timed out for $($item.Name) — leaving it running." 'WARN'
-            Stop-Job $item.Job -ErrorAction SilentlyContinue
-        }
-        Remove-Job $item.Job -Force -ErrorAction SilentlyContinue
-    }
-}
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Verification report — quick health check written at end of install
-# ─────────────────────────────────────────────────────────────────────────────
-function Show-VerificationReport {
-    $verifyLog = Join-Path (Split-Path $SetupDir -Parent) 'verify-install.log'
-    $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+        Start-Sleep -Seconds 2
 
-    # Refresh PATH one final time so newly installed tools are findable
-    Update-SessionPath
+        foreach ($item in @($running)) {
+            if ($item.Job.State -in @('Completed','Failed','Stopped')) {
+                try {
+                    Receive-Job $item.Job | ForEach-Object {
+                        Write-Log "  [$($item.Name)] $_" 'DIAG'
+                    }
+                } catch {
+                    Write-Log "  Failed to collect output for $($item.Name): $_" 'WARN'
+                }
 
-    $checks = @(
-        @{ Label = 'Git';          Cmd = 'git';       Args = @('--version') }
-        @{ Label = 'VS Code';      Cmd = 'code';      Args = @('--version') }
-        @{ Label = 'PowerShell 7'; Cmd = 'pwsh';      Args = @('--version') }
-        @{ Label = 'nvm';          Cmd = 'nvm';       Args = @('--version') }
-        @{ Label = 'Node.js';      Cmd = 'node';      Args = @('--version') }
-        @{ Label = 'npm';          Cmd = 'npm';       Args = @('--version') }
-        @{ Label = 'Claude Code';  Cmd = 'claude';    Args = @('--version') }
-        @{ Label = 'GitHub CLI';   Cmd = 'gh';        Args = @('--version') }
-        @{ Label = 'Docker';       Cmd = 'docker';    Args = @('--version') }
-        @{ Label = 'Python';       Cmd = 'python';    Args = @('--version')
-           # Fallback paths for SYSTEM sessions where Python's PATH isn't refreshed yet
-           FallbackExes = @(
-               'C:\Program Files\Python312\python.exe',
-               'C:\Program Files\Python313\python.exe',
-               'C:\Python312\python.exe',
-               'C:\Python3\python.exe',
-               'C:\ProgramData\chocolatey\bin\python.exe'
-           )
-        }
-        @{ Label = 'AWS CLI';      Cmd = 'aws';       Args = @('--version') }
-        @{ Label = 'Terraform';    Cmd = 'terraform'; Args = @('--version') }
-        @{ Label = 'Keeper Cmdr';  Cmd = 'keeper';    Args = @('--version')
-           FallbackExes = @(
-               'C:\Program Files\Python312\Scripts\keeper.exe',
-               'C:\Python312\Scripts\keeper.exe',
-               'C:\ProgramData\chocolatey\bin\keeper.exe'
-           )
-        }
-        @{ Label = 'Claude Desktop'; AppxQuery = '*claude*' }
-    )
+                if ($item.Job.State -ne 'Completed') {
+                    Add-InstallWarning "User configuration job did not complete cleanly for $($item.Name). State: $($item.Job.State)"
+                }
 
-    $lines  = @("=== INSTALLATION VERIFICATION  $ts ===")
-    $pass   = 0
-    $fail   = 0
-
-    Write-Log '' 'INFO'
-    Write-Log ('─' * 64) 'INFO'
-    Write-Log '  TOOL VERIFICATION' 'INFO'
-    Write-Log ('─' * 64) 'INFO'
-
-    foreach ($c in $checks) {
-        # AppxQuery entries — MSIX/UWP apps verified via provisioned package list, not CLI
-        if ($c.ContainsKey('AppxQuery')) {
-            $pkg = Get-AppxProvisionedPackage -Online -ErrorAction SilentlyContinue |
-                   Where-Object { $_.DisplayName -like $c['AppxQuery'] } |
-                   Select-Object -First 1
-            if ($pkg) {
-                $row = "  {0,-15} OK   {1}" -f $c.Label, $pkg.DisplayName
-                Write-Log $row 'OK'
-                $lines += $row
-                $pass++
-            } else {
-                $row = "  {0,-15} NOT FOUND" -f $c.Label
-                Write-Log $row 'WARN'
-                $lines += $row
-                $fail++
-            }
-            continue
-        }
-        $exe = Get-Command $c.Cmd -ErrorAction SilentlyContinue
-        # For tools with fallback paths, also check known install locations when
-        # Get-Command misses them (e.g. Python in a new SYSTEM session before PATH refresh)
-        if (-not $exe -and $c.ContainsKey('FallbackExes') -and $c['FallbackExes']) {
-            $fb = $c.FallbackExes | Where-Object { Test-Path $_ } | Select-Object -First 1
-            if ($fb) { $exe = $fb }
-        }
-        if ($exe) {
-            # .Source may not exist on all CommandInfo subtypes (functions, aliases);
-            # guard here so a bad node.exe state can't crash the whole verification.
-            $exeCmd = try {
-                if ($exe -is [string]) { $exe } else { $exe.Source }
-            } catch { $null }
-            if (-not $exeCmd) {
-                $row = "  {0,-15} OK   (path unresolvable)" -f $c.Label
-                Write-Log $row 'WARN'
-                $lines += $row
-                $pass++
+                Remove-Job $item.Job -Force -ErrorAction SilentlyContinue
+                $running.Remove($item)
                 continue
             }
-            # Run version check in a background job with an 8-second timeout.
-            # Some CLI wrappers (e.g. VS Code's code.cmd) hang indefinitely under
-            # SYSTEM context waiting for a UI/server connection.
-            $ver = try {
-                $job = Start-Job -ScriptBlock {
-                    param($exe, $arg)
-                    & $exe $arg 2>&1 | Select-Object -First 1
-                } -ArgumentList $exeCmd, $c.Args[0]
-                if ($job | Wait-Job -Timeout 8) {
-                    $out = Receive-Job $job
-                    Remove-Job $job -ErrorAction SilentlyContinue
-                    ($out | Select-Object -First 1) -replace '\s+$',''
-                } else {
-                    Remove-Job $job -Force -ErrorAction SilentlyContinue
-                    'installed (version check timed out)'
-                }
-            } catch { 'installed (check error)' }
-            $row = "  {0,-15} OK   {1}" -f $c.Label, $ver
-            Write-Log $row 'OK'
-            $lines += $row
-            $pass++
-        } else {
-            $row = "  {0,-15} NOT FOUND" -f $c.Label
-            Write-Log $row 'WARN'
-            $lines += $row
-            $fail++
+
+            if (((Get-Date) - $item.Start).TotalMinutes -gt 15) {
+                Write-Log "  Config job timed out for $($item.Name)." 'WARN'
+                Stop-Job $item.Job -ErrorAction SilentlyContinue
+                try {
+                    Receive-Job $item.Job | ForEach-Object {
+                        Write-Log "  [$($item.Name)] $_" 'DIAG'
+                    }
+                } catch { }
+                Remove-Job $item.Job -Force -ErrorAction SilentlyContinue
+                $running.Remove($item)
+                Add-InstallWarning "User configuration timed out for $($item.Name)."
+            }
         }
     }
-
-    $lines += "  ─────────────────────────────────────────────────────"
-    $lines += "  Pass: $pass   Fail/missing: $fail"
-    $lines += "=== END ==="
-    $lines | Set-Content $verifyLog -Encoding UTF8
-    Write-Log ('─' * 64) 'INFO'
-    Write-Log "Verification report saved: $verifyLog" 'INFO'
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Multi-user: register logon task for future accounts
-# ─────────────────────────────────────────────────────────────────────────────
 function Register-LogonTask {
-    Write-Log 'Registering per-user logon configuration task…' 'INFO'
+    Write-Log 'Registering per-user logon configuration task.' 'INFO'
 
-    # Prefer PowerShell 7 if available
-    $ps7  = 'C:\Program Files\PowerShell\7\pwsh.exe'
-    $psExe = if (Test-Path $ps7) { $ps7 } else { 'powershell.exe' }
+    if (-not (Test-Path $ConfigScript)) {
+        Add-InstallWarning 'Configure script missing. Scheduled task not registered.'
+        return
+    }
+
+    $ps7 = 'C:\Program Files\PowerShell\7\pwsh.exe'
+    $psExe = if (Test-Path $ps7) { $ps7 } else { "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" }
 
     $scriptArg = "-NonInteractive -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$ConfigScript`" -SetupDir `"$SetupDir`""
 
-    $action   = New-ScheduledTaskAction -Execute $psExe -Argument $scriptArg
-    $trigger  = New-ScheduledTaskTrigger -AtLogOn   # fires for every user logon
+    $action = New-ScheduledTaskAction -Execute $psExe -Argument $scriptArg
+    $trigger = New-ScheduledTaskTrigger -AtLogOn
     $settings = New-ScheduledTaskSettingsSet `
-                    -ExecutionTimeLimit (New-TimeSpan -Minutes 15) `
-                    -MultipleInstances IgnoreNew
+        -ExecutionTimeLimit (New-TimeSpan -Minutes 15) `
+        -MultipleInstances IgnoreNew
 
-    # Run as the interactive user (BUILTIN\Users) — this gives the task the correct
-    # user context so it writes to the right HKCU and %USERPROFILE%
     $principal = New-ScheduledTaskPrincipal -GroupId 'BUILTIN\Users' -RunLevel Limited
 
-    # Remove stale task registration before re-registering
     Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue |
         Unregister-ScheduledTask -Confirm:$false
 
     Register-ScheduledTask `
         -TaskName $TaskName `
         -Description 'Configures Master Electronics developer tools for each user on first logon.' `
-        -Action $action -Trigger $trigger -Settings $settings -Principal $principal `
+        -Action $action `
+        -Trigger $trigger `
+        -Settings $settings `
+        -Principal $principal `
         -Force | Out-Null
 
     Write-Log "Logon task '$TaskName' registered." 'OK'
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Main
-# ─────────────────────────────────────────────────────────────────────────────
-if (-not (Test-Path $SetupDir)) {
-    New-Item -ItemType Directory -Path $SetupDir -Force | Out-Null
-}
+# ---------------------------------------------------------------------------
+# Verification
+# ---------------------------------------------------------------------------
+function Invoke-VersionCheck {
+    param(
+        [Parameter(Mandatory)][string]$Exe,
+        [string[]]$Args = @('--version')
+    )
 
-Write-Log ('=' * 64) 'INFO'
-Write-Log '  Master Electronics — Developer Environment Installer' 'INFO'
-Write-Log ('=' * 64) 'INFO'
-Write-Log "Role: $Role  |  MaxRetries: $MaxRetries" 'INFO'
-Write-Log "Log : $LogPath" 'INFO'
+    try {
+        $job = Start-Job -ScriptBlock {
+            param($exe, $args)
+            & $exe @args 2>&1 | Select-Object -First 1
+        } -ArgumentList $Exe, $Args
 
-# Enforce TLS 1.2/1.3 for all web requests
-Set-TlsPolicy
-
-# Copy Configure-UserEnvironment.ps1 to the persistent setup directory
-$localConfig = Join-Path $PSScriptRoot 'Configure-UserEnvironment.ps1'
-if (Test-Path $localConfig) {
-    Copy-Item $localConfig $ConfigScript -Force
-    Write-Log "Configure-UserEnvironment.ps1 copied to $SetupDir" 'DIAG'
-} else {
-    Write-Log 'WARNING: Configure-UserEnvironment.ps1 not found alongside installer.' 'WARN'
-}
-
-# Save VS Code extension list for per-user configure script
-$VsCodeExtensions | ConvertTo-Json | Set-Content $ExtListFile -Encoding UTF8
-
-# Ensure winget is healthy before starting package loop.
-# Skip in SYSTEM context — winget is unreliable there and Chocolatey is Tier 1.
-if ($RunningAsSystem) {
-    Write-Log 'Running as SYSTEM — skipping winget pre-flight (Choco → Direct → winget).' 'DIAG'
-} else {
-    Ensure-Winget | Out-Null
-    Repair-WingetSources
-}
-
-# ── Bulk Choco install (SYSTEM fast path) ────────────────────────────────────
-# One choco call installs everything at once; the per-package loop below acts as
-# a verification and fallback pass for anything that failed or isn't in the config.
-if ($RunningAsSystem) {
-    $chocoConfig = Join-Path $PSScriptRoot 'packages.config'
-    if ((Test-Path $chocoConfig) -and (Ensure-Chocolatey)) {
-        Write-Log 'Running bulk Choco install from packages.config…' 'INFO'
-        & choco install $chocoConfig --yes --no-progress 2>&1 | ForEach-Object {
-            Write-Log "  [choco] $_" 'DIAG'
+        if ($job | Wait-Job -Timeout 8) {
+            $out = Receive-Job $job
+            Remove-Job $job -Force -ErrorAction SilentlyContinue
+            return (($out | Select-Object -First 1) -replace '\s+$','')
         }
-        $bulkExit = $LASTEXITCODE
-        Write-Log "  Bulk Choco exit $bulkExit" 'DIAG'
-        if ($bulkExit -eq 0) {
-            Write-Log 'Bulk Choco install complete.' 'OK'
-        } else {
-            Write-Log 'Bulk Choco partial/failed — per-package fallback will cover remaining.' 'WARN'
-        }
-        Update-SessionPath
+
+        Remove-Job $job -Force -ErrorAction SilentlyContinue
+        return 'installed (version check timed out)'
+    } catch {
+        return 'installed (check error)'
     }
 }
 
-# ── Install packages (per-package fallback / verification) ───────────────────
+function Show-VerificationReport {
+    $verifyLog = Join-Path (Split-Path $SetupDir -Parent) 'verify-install.log'
+    $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+
+    Update-SessionPath
+
+    $checks = @(
+        @{ Label = 'Git';          Cmd = 'git';       Args = @('--version'); Required = $true }
+        @{ Label = 'VS Code';      Cmd = 'code';      Args = @('--version'); Required = $true;  FallbackExes = @('C:\Program Files\Microsoft VS Code\Code.exe') }
+        @{ Label = 'PowerShell 7'; Cmd = 'pwsh';      Args = @('--version'); Required = $true;  FallbackExes = @('C:\Program Files\PowerShell\7\pwsh.exe') }
+        @{ Label = 'nvm';          Cmd = 'nvm';       Args = @('version');   Required = $true;  FallbackExes = @('C:\ProgramData\nvm\nvm.exe') }
+        @{ Label = 'Node.js';      Cmd = 'node';      Args = @('--version'); Required = $true;  FallbackExes = @('C:\Program Files\nodejs\node.exe') }
+        @{ Label = 'npm';          Cmd = 'npm.cmd';   Args = @('--version'); Required = $true;  FallbackExes = @('C:\Program Files\nodejs\npm.cmd') }
+        @{ Label = 'Claude Code';  Cmd = 'claude.cmd';Args = @('--version'); Required = $true;  FallbackExes = @('C:\ProgramData\npm\claude.cmd') }
+        @{ Label = 'GitHub CLI';   Cmd = 'gh';        Args = @('--version'); Required = $true }
+        @{ Label = 'Docker';       Cmd = 'docker';    Args = @('--version'); Required = $true }
+        @{ Label = 'Python';       Cmd = 'python';    Args = @('--version'); Required = $true;  FallbackExes = @('C:\Program Files\Python312\python.exe','C:\Python312\python.exe','C:\ProgramData\chocolatey\bin\python.exe') }
+        @{ Label = 'AWS CLI';      Cmd = 'aws';       Args = @('--version'); Required = $false }
+        @{ Label = 'Terraform';    Cmd = 'terraform'; Args = @('--version'); Required = $false }
+        @{ Label = 'Claude Desktop'; AppxQuery = '*claude*'; Required = $false }
+    )
+
+    $lines = @("=== INSTALLATION VERIFICATION  $ts ===")
+    $pass = 0
+    $missingRequired = 0
+    $missingOptional = 0
+
+    Write-Log '' 'INFO'
+    Write-Log ('-' * 64) 'INFO'
+    Write-Log '  TOOL VERIFICATION' 'INFO'
+    Write-Log ('-' * 64) 'INFO'
+
+    foreach ($c in $checks) {
+        if ($c.ContainsKey('AppxQuery')) {
+            $pkg = Get-AppxProvisionedPackage -Online -ErrorAction SilentlyContinue |
+                Where-Object { $_.DisplayName -like $c.AppxQuery } |
+                Select-Object -First 1
+
+            if ($pkg) {
+                $row = "  {0,-17} OK   {1}" -f $c.Label, $pkg.DisplayName
+                Write-Log $row 'OK'
+                $lines += $row
+                $pass++
+            } else {
+                $row = "  {0,-17} NOT FOUND optional" -f $c.Label
+                Write-Log $row 'WARN'
+                $lines += $row
+                $missingOptional++
+            }
+            continue
+        }
+
+        $fallbacks = if ($c.ContainsKey('FallbackExes')) { $c.FallbackExes } else { @() }
+        $exe = Test-CommandAvailable -Command $c.Cmd -FallbackExes $fallbacks
+
+        if ($exe) {
+            $ver = Invoke-VersionCheck -Exe $exe -Args $c.Args
+            $row = "  {0,-17} OK   {1}" -f $c.Label, $ver
+            Write-Log $row 'OK'
+            $lines += $row
+            $pass++
+        } else {
+            if ($c.Required) {
+                $row = "  {0,-17} NOT FOUND required" -f $c.Label
+                Write-Log $row 'FAIL'
+                $lines += $row
+                $missingRequired++
+            } else {
+                $row = "  {0,-17} NOT FOUND optional" -f $c.Label
+                Write-Log $row 'WARN'
+                $lines += $row
+                $missingOptional++
+            }
+        }
+    }
+
+    $lines += "  -----------------------------------------------------"
+    $lines += "  Pass: $pass   Missing required: $missingRequired   Missing optional: $missingOptional"
+    $lines += "=== END ==="
+    $lines | Set-Content $verifyLog -Encoding UTF8
+
+    Write-Log ('-' * 64) 'INFO'
+    Write-Log "Verification report saved: $verifyLog" 'INFO'
+
+    if ($missingRequired -gt 0) {
+        Add-InstallError "Verification failed. Missing required tools: $missingRequired."
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+Write-Log ('=' * 64) 'INFO'
+Write-Log '  Master Electronics - Developer Environment Installer' 'INFO'
+Write-Log ('=' * 64) 'INFO'
+Write-Log "Role: $Role | MaxRetries: $MaxRetries | RunningAsSystem: $RunningAsSystem" 'INFO'
+Write-Log "Log : $LogPath" 'INFO'
+Write-Log "Temp: $TempDir" 'INFO'
+
+Send-UserNotification -Message 'IT Update: Developer tool installation has started. You can continue working, but some tools may not be available until installation completes and you sign out or restart.' -TimeoutSeconds 120
+
+Set-TlsPolicy
+Set-RequiredExecutionPolicy
+Update-SessionPath
+
+$localConfig = Join-Path $PSScriptRoot 'Configure-UserEnvironment.ps1'
+if (Test-Path $localConfig) {
+    Copy-Item $localConfig $ConfigScript -Force
+    Write-Log "Configure-UserEnvironment.ps1 copied to $SetupDir" 'OK'
+} else {
+    Add-InstallWarning 'Configure-UserEnvironment.ps1 not found alongside installer.'
+}
+
+$VsCodeExtensions | ConvertTo-Json | Set-Content $ExtListFile -Encoding UTF8
+
+if ($RunningAsSystem) {
+    Write-Log 'Running as SYSTEM. Bulk Chocolatey is disabled. Using bundled/direct, Chocolatey, then winget fallback.' 'DIAG'
+} else {
+    Ensure-Winget | Out-Null
+    if (Get-Command winget -ErrorAction SilentlyContinue) {
+        Repair-WingetSources
+    }
+}
+
 foreach ($pkg in $Packages) {
-    Install-Package $pkg
-    # Refresh PATH after each install so subsequent packages see newly added tools
+    try {
+        Install-Package $pkg
+    } catch {
+        Add-InstallError "Unhandled install error for '$($pkg.Name)': $_"
+    }
+
     Update-SessionPath
 }
 
-# ── Claude Code (needs Node, so goes after nvm-windows) ──────────────────────
 Install-ClaudeCode
-
-# ── Deploy setup guide chatbot ────────────────────────────────────────────────
-Deploy-SetupChatbot
-
-# ── Configure existing user profiles ─────────────────────────────────────────
 Configure-ExistingProfiles
-
-# ── Register logon task for future users ─────────────────────────────────────
 Register-LogonTask
 
-# ── Verification report ───────────────────────────────────────────────────────
-try { Show-VerificationReport } catch { Write-Log "Verification report error: $_" 'WARN' }
+try {
+    Show-VerificationReport
+} catch {
+    Add-InstallWarning "Verification report error: $_"
+}
 
-# ── Final summary ─────────────────────────────────────────────────────────────
 $Manifest.EndTime = (Get-Date -Format 'o')
 Save-Manifest
 
 $failCount = $Manifest.Errors.Count
+$warnCount = $Manifest.Warnings.Count
 
 Write-Log '' 'INFO'
 Write-Log ('=' * 64) 'INFO'
 Write-Log '  INSTALLATION COMPLETE' 'INFO'
 Write-Log ('=' * 64) 'INFO'
+
 $elapsed = [datetime]$Manifest.EndTime - [datetime]$Manifest.StartTime
 $dur = '{0:D2}m {1:D2}s' -f [int]$elapsed.TotalMinutes, $elapsed.Seconds
+
 Write-Log "Duration           : $dur" 'INFO'
 Write-Log "Packages attempted : $($Manifest.Packages.Count)" 'INFO'
+Write-Log "Warnings           : $warnCount" $(if ($warnCount -gt 0) { 'WARN' } else { 'OK' })
 Write-Log "Failures           : $failCount" $(if ($failCount -gt 0) { 'FAIL' } else { 'OK' })
 
-# ── Notify signed-on users that installation is complete ─────────────────────
-try {
-    $notifyMsg = 'IT Update: Developer tool installation is complete. If a service is not working as expected, please restart your computer.'
-    & "$env:SystemRoot\System32\msg.exe" * /TIME:120 $notifyMsg 2>&1 | Out-Null
-    Write-Log 'Completion notification sent to signed-on users.' 'OK'
-} catch {
-    Write-Log "Could not send completion notification: $_" 'WARN'
+Send-UserNotification -Message 'IT Update: Developer tool installation is complete. Please sign out and back in, or restart your computer, before using Claude Code, PowerShell 7, npm, Docker, or VS Code.' -TimeoutSeconds 120
+
+if ($warnCount -gt 0) {
+    Write-Log '' 'INFO'
+    Write-Log 'Warnings:' 'WARN'
+    foreach ($w in $Manifest.Warnings) {
+        Write-Log "  * $w" 'WARN'
+    }
 }
 
 if ($failCount -gt 0) {
     Write-Log '' 'INFO'
     Write-Log 'Failed items:' 'FAIL'
-    foreach ($e in $Manifest.Errors) { Write-Log "  * $e" 'FAIL' }
-    Write-Log '' 'INFO'
+    foreach ($e in $Manifest.Errors) {
+        Write-Log "  * $e" 'FAIL'
+    }
     Write-Log "Full log: $LogPath" 'INFO'
     exit 1
 }
 
 Write-Log "Full log: $LogPath" 'INFO'
 exit 0
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
