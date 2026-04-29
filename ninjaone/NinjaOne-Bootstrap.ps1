@@ -63,29 +63,41 @@ try {
     $duration = (Get-Date) - $startTime
     Write-NinjaLog ("Install finished in {0}m {1}s. Exit code: {2}" -f [int]$duration.TotalMinutes, $duration.Seconds, $exitCode)
 
-    # ── Summary: pull verification table + failures from install.log ──────────
-    $installLog = Join-Path $Root 'DevSetup\install.log'
+    # ── Summary: output clean verification reports ─────────────────────────────
+    $verifyInstall   = Join-Path $Root 'verify-install.log'
+    $verifyConfigure = Join-Path $Root 'verify-configure.log'
+    $installLog      = Join-Path $Root 'DevSetup\install.log'
+
+    Write-Host ''
+    Write-Host '========== TOOL INSTALLATION =========='
+    if (Test-Path $verifyInstall) {
+        Get-Content $verifyInstall | ForEach-Object { Write-Host $_ }
+    } else {
+        Write-Host "verify-install.log not found at $verifyInstall"
+    }
+
+    Write-Host ''
+    Write-Host '========== USER PROFILE CONFIG =========='
+    if (Test-Path $verifyConfigure) {
+        Get-Content $verifyConfigure | ForEach-Object { Write-Host $_ }
+    } else {
+        Write-Host "verify-configure.log not found at $verifyConfigure"
+    }
+
+    Write-Host ''
+    Write-Host '========== WARNINGS / FAILURES =========='
     if (Test-Path $installLog) {
-        $lines = Get-Content $installLog -ErrorAction SilentlyContinue
-
-        Write-Host ''
-        Write-Host '========== TOOL VERIFICATION =========='
-        $lines | Where-Object { $_ -match '\[(OK|FAIL|WARN)\]\s+\w' } |
-            Select-Object -Last 25 |
-            ForEach-Object { Write-Host $_ }
-
-        $failLines = @($lines | Where-Object { $_ -match '\[FAIL\]' })
-        Write-Host ''
-        Write-Host '========== FAILURES ==================='
-        if ($failLines.Count -gt 0) {
-            $failLines | ForEach-Object { Write-Host $_ }
+        $warnFail = @(Get-Content $installLog -ErrorAction SilentlyContinue |
+            Where-Object { $_ -match '^\[.*\]\[(WARN|FAIL)\](?!\s+\[DIAG\])' })
+        if ($warnFail.Count -gt 0) {
+            $warnFail | Select-Object -Last 30 | ForEach-Object { Write-Host $_ }
         } else {
             Write-Host 'None.'
         }
-        Write-Host '======================================='
     } else {
-        Write-NinjaLog "WARNING: install.log not found at $installLog"
+        Write-Host "install.log not found at $installLog"
     }
+    Write-Host '========================================='
 
     if (Test-Path $DeployErr) {
         $errTail = @(Get-Content $DeployErr -Tail 20 -ErrorAction SilentlyContinue)
