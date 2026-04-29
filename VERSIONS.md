@@ -1,7 +1,7 @@
 ﻿# Bundled Installer Versions
 
-Built: 2026-04-29 04:00:45 UTC
-Commit: 836cb15
+Built: 2026-04-29 04:56:28 UTC
+Commit: 98f1d1e
 
 | Package | Version | File | Size |
 |---------|---------|------|------|
