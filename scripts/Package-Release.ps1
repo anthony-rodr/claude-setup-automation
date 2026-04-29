@@ -223,8 +223,8 @@ foreach ($m in $manifest) {
 }
 $lines += ""
 $lines += "**Not bundled** (downloaded at runtime by the installer):"
-$lines += "- Docker Desktop  (~600 MB — Chocolatey + direct fallback)"
-$lines += "- Claude Desktop  (MSIX — direct download)"
+$lines += "- Docker Desktop  (~600 MB - Chocolatey + direct fallback)"
+$lines += "- Claude Desktop  (MSIX - direct download)"
 $lines += ""
 $lines += "Re-run Package-Release.ps1 before each deployment wave to refresh bundled versions."
 $lines | Set-Content (Join-Path $BundledDir 'VERSIONS.md') -Encoding UTF8
@@ -247,7 +247,7 @@ $requiredBundles = @(
 )
 $missing = $requiredBundles | Where-Object { -not (Test-Path (Join-Path $BundledDir $_)) }
 if ($missing) {
-    throw "Required bundled installers missing — fix downloads before packaging:`n  $($missing -join "`n  ")"
+    throw "Required bundled installers missing - fix downloads before packaging:`n  $($missing -join "`n  ")"
 }
 Write-Step "  All required bundles present." 'Green'
 
@@ -277,7 +277,7 @@ Write-Step 'Stamping NinjaOne scripts with current git commit hash…'
 try {
     $hash = (& git -C $ProjectRoot rev-parse --short HEAD 2>&1).Trim()
     if ($LASTEXITCODE -ne 0 -or $hash -notmatch '^[0-9a-f]{7}$') {
-        Write-Step "  WARNING: Could not read git commit hash (got: '$hash') — skipping stamp." 'Yellow'
+        Write-Step "  WARNING: Could not read git commit hash (got: '$hash') - skipping stamp." 'Yellow'
     } else {
         $ninjaScripts = @('Deploy-DevEnvironment.ps1', 'Rollback-DevEnvironment.ps1')
         foreach ($scriptName in $ninjaScripts) {
@@ -288,7 +288,7 @@ try {
                 [System.IO.File]::WriteAllText($scriptPath, $stamped, [System.Text.Encoding]::UTF8)
                 Write-Step "  Stamped: $scriptName  (commit $hash)" 'Green'
             } else {
-                Write-Step "  WARNING: `$ScriptVersion line not found in $scriptName — not stamped." 'Yellow'
+                Write-Step "  WARNING: `$ScriptVersion line not found in $scriptName - not stamped." 'Yellow'
             }
         }
         Write-Step ''
