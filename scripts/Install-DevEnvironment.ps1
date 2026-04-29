@@ -827,7 +827,7 @@ function Install-ViaDirectDownload {
                 $resolved = [System.IO.Path]::GetFullPath($tmpFile)
                 $argString = "/i `"$resolved`" $($Pkg.DArgs)"
                 $result = Invoke-Process -FilePath 'msiexec.exe' -ArgumentList @($argString) -TimeoutSeconds 1800
-                if ($result.ExitCode -notin @(0,3010)) {
+                if ($result.ExitCode -notin @(0,3010,1641)) {
                     throw "msiexec exit $($result.ExitCode)"
                 }
             }
@@ -1160,7 +1160,9 @@ function Install-Package {
             }
         }
 
-        if (-not $entry.Success) {
+        # Only attempt direct download if no bundled file exists; when a bundled
+        # file is present Install-ViaDirectDownload would just retry it again.
+        if (-not $entry.Success -and -not (Test-Path (Get-BundledPath $Pkg))) {
             if (Install-ViaDirectDownload $Pkg) {
                 $entry.Method = 'direct'
                 $entry.Success = $true
@@ -1195,7 +1197,9 @@ function Install-Package {
             }
         }
 
-        if (-not $entry.Success) {
+        # Only attempt direct download if no bundled file exists; when a bundled
+        # file is present Install-ViaDirectDownload would just retry it again.
+        if (-not $entry.Success -and -not (Test-Path (Get-BundledPath $Pkg))) {
             if (Install-ViaDirectDownload $Pkg) {
                 $entry.Method = 'direct'
                 $entry.Success = $true
