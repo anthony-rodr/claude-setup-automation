@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     Builds the claude-setup-automation.zip release package.
@@ -251,6 +251,25 @@ if ($missing) {
 }
 Write-Step "  All required bundles present." 'Green'
 
+# ── 11b. Syntax-check all scripts before packaging ───────────────────────────
+Write-Step 'Syntax-checking scripts…'
+$scriptFiles = Get-ChildItem -Path (Join-Path $ProjectRoot 'scripts') -Filter '*.ps1' -File
+$syntaxErrors = $false
+foreach ($sf in $scriptFiles) {
+    $parseErrors = $null
+    $null = [System.Management.Automation.Language.Parser]::ParseFile($sf.FullName, [ref]$null, [ref]$parseErrors)
+    if ($parseErrors.Count -gt 0) {
+        Write-Step "  SYNTAX ERROR in $($sf.Name):" 'Red'
+        foreach ($e in $parseErrors) { Write-Step "    Line $($e.Extent.StartLineNumber): $($e.Message)" 'Red' }
+        $syntaxErrors = $true
+    } else {
+        Write-Step "  OK: $($sf.Name)" 'DarkGreen'
+    }
+}
+if ($syntaxErrors) {
+    throw "One or more scripts failed syntax check — fix errors before packaging."
+}
+
 # ── 12. Build zip ─────────────────────────────────────────────────────────────
 Write-Step 'Building claude-setup-automation.zip…'
 if (Test-Path $ZipPath) { Remove-Item $ZipPath -Force }
@@ -285,7 +304,8 @@ try {
             $content    = [System.IO.File]::ReadAllText($scriptPath)
             $stamped    = $content -replace '\$ScriptVersion\s*=\s*''[^'']*''', "`$ScriptVersion = '$hash'"
             if ($stamped -ne $content) {
-                [System.IO.File]::WriteAllText($scriptPath, $stamped, [System.Text.Encoding]::UTF8)
+                $utf8bom = New-Object System.Text.UTF8Encoding $true
+                [System.IO.File]::WriteAllText($scriptPath, $stamped, $utf8bom)
                 Write-Step "  Stamped: $scriptName  (commit $hash)" 'Green'
             } else {
                 Write-Step "  WARNING: `$ScriptVersion line not found in $scriptName - not stamped." 'Yellow'

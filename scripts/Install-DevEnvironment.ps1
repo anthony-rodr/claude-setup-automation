@@ -1,4 +1,4 @@
-#Requires -RunAsAdministrator
+﻿#Requires -RunAsAdministrator
 <#
 .SYNOPSIS
     Silent developer environment installer for Master Electronics.
@@ -692,16 +692,28 @@ function Install-ViaDirectDownload {
     param([hashtable]$Pkg)
 
     if ($Pkg.DType -eq 'wsl-install') {
+        # wsl.exe --install fails under SYSTEM when launched via Start-Process with
+        # redirected handles ("The handle is invalid"). Use DISM feature enablement
+        # instead, which works reliably as SYSTEM with no console handle required.
         try {
-            Write-Log "  Installing WSL via wsl.exe $($Pkg.DArgs)" 'DIAG'
-            $result = Invoke-Process -FilePath 'wsl.exe' -ArgumentList ($Pkg.DArgs -split '\s+') -TimeoutSeconds 1200 -Label 'wsl'
-            if ($result.ExitCode -in @(0,1,3010)) {
-                Write-Log '  WSL installed or already enabled. Reboot may be required.' 'OK'
+            Write-Log '  Enabling WSL via DISM (Microsoft-Windows-Subsystem-Linux + VirtualMachinePlatform).' 'DIAG'
+
+            $wslResult = Invoke-Process -FilePath "$env:SystemRoot\System32\dism.exe" `
+                -ArgumentList @('/online', '/enable-feature', '/featurename:Microsoft-Windows-Subsystem-Linux', '/all', '/norestart') `
+                -TimeoutSeconds 600 -Label 'dism-wsl'
+
+            $vmpResult = Invoke-Process -FilePath "$env:SystemRoot\System32\dism.exe" `
+                -ArgumentList @('/online', '/enable-feature', '/featurename:VirtualMachinePlatform', '/all', '/norestart') `
+                -TimeoutSeconds 600 -Label 'dism-vmp'
+
+            if ($wslResult.ExitCode -in @(0,3010) -and $vmpResult.ExitCode -in @(0,3010)) {
+                Write-Log '  WSL features enabled. Reboot required before WSL can be used.' 'OK'
                 return $true
             }
-            Write-Log "  WSL exited $($result.ExitCode)." 'WARN'
+
+            Write-Log "  DISM WSL exit $($wslResult.ExitCode), VirtualMachinePlatform exit $($vmpResult.ExitCode)." 'WARN'
         } catch {
-            Write-Log "  WSL install failed: $_" 'WARN'
+            Write-Log "  WSL DISM feature enablement failed: $_" 'WARN'
         }
         return $false
     }
@@ -880,14 +892,31 @@ function Install-NodeThroughNvm {
     Write-Log 'Installing Node.js LTS via nvm.' 'INFO'
 
     $install = Invoke-Process -FilePath $nvmExe -ArgumentList @('install','lts') -TimeoutSeconds 1200 -Label 'nvm'
-    if ($install.ExitCode -ne 0) {
+
+    # nvm may exit non-zero if the LTS alias lookup fails (DNS/network), but still
+    # successfully install a version. Parse the version from output and continue.
+    $nodeVersion = $null
+    if ($install.Output -match 'nvm use (\d+\.\d+\.\d+)') {
+        $nodeVersion = $Matches[1]
+        Write-Log "Parsed installed Node version from nvm output: $nodeVersion" 'DIAG'
+    }
+
+    $installSucceeded = $install.ExitCode -eq 0 -or
+        ($nodeVersion -and $install.Output -match '(?i)installation complete')
+
+    if (-not $installSucceeded) {
         Add-InstallError "nvm install lts failed. $($install.Output)"
         return $false
     }
 
-    $use = Invoke-Process -FilePath $nvmExe -ArgumentList @('use','lts') -TimeoutSeconds 300 -Label 'nvm'
+    # Prefer explicit version number over the 'lts' alias - nvm use with an alias
+    # can fail silently on machines where the alias lookup also fails.
+    $useArg = if ($nodeVersion) { $nodeVersion } else { 'lts' }
+    Write-Log "Running: nvm use $useArg" 'DIAG'
+
+    $use = Invoke-Process -FilePath $nvmExe -ArgumentList @('use', $useArg) -TimeoutSeconds 300 -Label 'nvm'
     if ($use.ExitCode -ne 0) {
-        Add-InstallError "nvm use lts failed. $($use.Output)"
+        Add-InstallError "nvm use $useArg failed. $($use.Output)"
         return $false
     }
 
