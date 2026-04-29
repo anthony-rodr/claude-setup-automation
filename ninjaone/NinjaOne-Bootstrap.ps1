@@ -17,18 +17,19 @@ function Write-NinjaLog {
     Write-Host $line
 }
 
-$MutexName = 'Global\MasterElectronics-DevEnvironment-Install'
-$mutex     = New-Object System.Threading.Mutex($false, $MutexName)
-$hasMutex  = $false
+$MutexName     = 'Global\MasterElectronics-DevEnvironment-Install'
+$mutex         = New-Object System.Threading.Mutex($false, $MutexName)
+$hasMutex      = $false
+$finalExitCode = 1
 
 try {
     $hasMutex = $mutex.WaitOne(0)
     if (-not $hasMutex) {
         Write-NinjaLog 'Another Master Electronics Dev Environment install is already running. Exiting.'
-        exit 0
+        $finalExitCode = 0
+        return
     }
 
-try {
     Write-NinjaLog "Bootstrap started. Computer: $env:COMPUTERNAME"
     Write-NinjaLog "Running as: $([System.Security.Principal.WindowsIdentity]::GetCurrent().Name)"
 
@@ -54,7 +55,8 @@ try {
     if (-not $completed) {
         try { $proc.Kill() } catch {}
         Write-NinjaLog 'Deploy timed out after 90 minutes and was killed.'
-        exit 1
+        $finalExitCode = 1
+        return
     }
     $exitCode = $proc.ExitCode
     if ($null -eq $exitCode) { $exitCode = 0 }
@@ -100,21 +102,18 @@ try {
     Write-NinjaLog "Full deploy errors : $DeployErr"
     Write-NinjaLog "Bootstrap exiting with code $exitCode"
 
-    [Console]::Out.Flush()
-    [Console]::Error.Flush()
-
-    exit $exitCode
+    $finalExitCode = $exitCode
 
 } catch {
     Write-NinjaLog "Bootstrap failed: $($_.Exception.Message)"
     Write-Host ''
     if (Test-Path $NinjaLog) { Get-Content $NinjaLog -Tail 40 }
+    $finalExitCode = 1
+} finally {
     [Console]::Out.Flush()
     [Console]::Error.Flush()
-    exit 1
-}
-
-} finally {
     if ($hasMutex) { $mutex.ReleaseMutex() }
     $mutex.Dispose()
 }
+
+exit $finalExitCode
