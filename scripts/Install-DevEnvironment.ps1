@@ -401,6 +401,7 @@ $Packages = @(
         Winget    = 'Python.Python.3.12'
         Choco     = 'python312'
         VerifyCmd = 'python'
+        VerifyExe = 'C:\Program Files\Python312\python.exe'
         FallbackExes = @(
             'C:\Program Files\Python312\python.exe',
             'C:\Program Files\Python313\python.exe',
@@ -815,7 +816,7 @@ function Install-ViaDirectDownload {
                 }
 
                 if ($Pkg.ContainsKey('AltPaths') -and $Pkg.AltPaths) {
-                    $deadline = (Get-Date).AddSeconds(90)
+                    $deadline = (Get-Date).AddSeconds(300)
                     $found = $null
                     while (-not $found -and (Get-Date) -lt $deadline) {
                         foreach ($d in $Pkg.AltPaths) {
@@ -1028,31 +1029,40 @@ function Install-NodeThroughNvm {
         return $false
     }
 
-    # If the symlink target exists as a plain directory (not a junction), nvm cannot
-    # create the junction over it and will silently report success without placing node.exe.
-    # Remove the plain directory so nvm use can create the junction cleanly.
-    if (Test-Path $NvmSymlink) {
-        $symlinkItem = Get-Item $NvmSymlink -ErrorAction SilentlyContinue
-        if ($symlinkItem -and $symlinkItem.LinkType -ne 'Junction') {
-            Write-Log "$NvmSymlink exists as a plain directory (not a junction) - removing so nvm can create junction." 'DIAG'
-            Remove-Item $NvmSymlink -Recurse -Force -ErrorAction SilentlyContinue
+    # If the download was interrupted/rolled back, skip nvm use entirely — it would hang
+    # trying to look up the 'lts' alias over the blocked network. The $nvmNodePresent
+    # check below will detect no node.exe and trigger the bundled Node LTS zip fallback.
+    $downloadInterrupted = $install.Output -match '(?i)(download interrupted|installation canceled)'
+
+    if (-not $downloadInterrupted) {
+        # If the symlink target exists as a plain directory (not a junction), nvm cannot
+        # create the junction over it and will silently report success without placing node.exe.
+        # Remove the plain directory so nvm use can create the junction cleanly.
+        if (Test-Path $NvmSymlink) {
+            $symlinkItem = Get-Item $NvmSymlink -ErrorAction SilentlyContinue
+            if ($symlinkItem -and $symlinkItem.LinkType -ne 'Junction') {
+                Write-Log "$NvmSymlink exists as a plain directory (not a junction) - removing so nvm can create junction." 'DIAG'
+                Remove-Item $NvmSymlink -Recurse -Force -ErrorAction SilentlyContinue
+            }
         }
+
+        # Prefer explicit version number over the 'lts' alias - nvm use with an alias
+        # can fail silently on machines where the alias lookup also fails.
+        $useArg = if ($nodeVersion) { $nodeVersion } else { 'lts' }
+        Write-Log "Running: nvm use $useArg" 'DIAG'
+
+        $use = Invoke-Process -FilePath $nvmExe -ArgumentList @('use', $useArg) -TimeoutSeconds 300 -Label 'nvm'
+        $useSucceeded = $use.ExitCode -eq 0 -or $use.Output -match '(?i)now using node'
+        if (-not $useSucceeded) {
+            Add-InstallError "nvm use $useArg failed. $($use.Output)"
+            return $false
+        }
+
+        Update-SessionPath
+        Add-MachinePath $NvmSymlink
+    } else {
+        Write-Log 'nvm download interrupted — skipping nvm use, falling back to bundled Node.' 'WARN'
     }
-
-    # Prefer explicit version number over the 'lts' alias - nvm use with an alias
-    # can fail silently on machines where the alias lookup also fails.
-    $useArg = if ($nodeVersion) { $nodeVersion } else { 'lts' }
-    Write-Log "Running: nvm use $useArg" 'DIAG'
-
-    $use = Invoke-Process -FilePath $nvmExe -ArgumentList @('use', $useArg) -TimeoutSeconds 300 -Label 'nvm'
-    $useSucceeded = $use.ExitCode -eq 0 -or $use.Output -match '(?i)now using node'
-    if (-not $useSucceeded) {
-        Add-InstallError "nvm use $useArg failed. $($use.Output)"
-        return $false
-    }
-
-    Update-SessionPath
-    Add-MachinePath $NvmSymlink
 
     # Verify nvm actually downloaded node. nvm can print "Installation complete" and
     # "Now using node vX" without placing any files if nodejs.org is unreachable
