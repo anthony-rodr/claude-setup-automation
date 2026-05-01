@@ -427,6 +427,28 @@ $Packages = @(
             'C:\Python3'
         )
         PreInstall = {
+            # Python's EXE bootstrapper exits immediately (error 1618) if Windows
+            # Installer is already busy. Previous bundled installers (Git, VS Code,
+            # PS7) spawn background msiexec processes that may still be running.
+            # Wait on the Global\_MSIExecute mutex until the Installer is idle.
+            $msiDeadline = (Get-Date).AddSeconds(300)
+            $msiLogged   = $false
+            while ((Get-Date) -lt $msiDeadline) {
+                try {
+                    $msiMutex = [System.Threading.Mutex]::OpenExisting('Global\_MSIExecute')
+                    $msiMutex.Dispose()
+                    if (-not $msiLogged) {
+                        Write-Log '  Waiting for Windows Installer to become idle before Python install...' 'DIAG'
+                        $msiLogged = $true
+                    }
+                    Start-Sleep -Seconds 8
+                } catch [System.Threading.WaitHandleCannotBeOpenedException] {
+                    break  # mutex gone — Installer is idle
+                } catch {
+                    break  # unexpected; proceed
+                }
+            }
+
             # Remove stale Python directories that cause MSI error 1603 on re-install
             # after an incomplete rollback leaves the directory behind.
             foreach ($d in @('C:\Python312','C:\Python313','C:\Program Files\Python312','C:\Program Files\Python313')) {
