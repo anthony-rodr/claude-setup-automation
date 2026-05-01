@@ -34,6 +34,13 @@ $VersionsUrl     = 'https://github.com/anthony-rodr/claude-setup-automation/rele
 $VersionsOnDisk  = Join-Path $StageDir 'VERSIONS.md'
 # ──────────────────────────────────────────────────────────────────────────────
 
+# Auth headers for private repo — PAT injected by bootstrap via $env:GITHUB_PAT
+$AuthHeaders = if ($env:GITHUB_PAT) {
+    @{ Authorization = "token $env:GITHUB_PAT"; 'User-Agent' = 'claude-setup-automation' }
+} else {
+    @{ 'User-Agent' = 'claude-setup-automation' }
+}
+
 $ErrorActionPreference = 'Stop'
 
 function Write-Step {
@@ -53,7 +60,7 @@ try {
     try {
         $verResp = Invoke-RestMethod `
             -Uri 'https://api.github.com/repos/anthony-rodr/claude-setup-automation/commits/main' `
-            -Headers @{ 'User-Agent' = 'claude-setup-automation' } -ErrorAction Stop
+            -Headers $AuthHeaders -ErrorAction Stop
         $latestSha = $verResp.sha.Substring(0, 7)
         if ($ScriptVersion -eq 'GIT_COMMIT_HASH') {
             # Pulled live from GitHub — always current, no stamp needed
@@ -89,7 +96,7 @@ try {
     $skipDownload = $false
     if (Test-Path $ExtractDir) {
         try {
-            $resp = Invoke-WebRequest -Uri $VersionsUrl -UseBasicParsing -ErrorAction Stop
+            $resp = Invoke-WebRequest -Uri $VersionsUrl -Headers $AuthHeaders -UseBasicParsing -ErrorAction Stop
             # Content may be [byte[]] on older PS5 builds — decode explicitly
             $remoteVersions = if ($resp.Content -is [byte[]]) {
                 [System.Text.Encoding]::UTF8.GetString($resp.Content)
@@ -118,7 +125,7 @@ try {
         New-Item -ItemType Directory -Path $ExtractDir -Force | Out-Null
 
         Write-Step "Downloading package from: $PackageUrl"
-        Invoke-WebRequest -Uri $PackageUrl -OutFile $ZipPath -UseBasicParsing -ErrorAction Stop
+        Invoke-WebRequest -Uri $PackageUrl -Headers $AuthHeaders -OutFile $ZipPath -UseBasicParsing -ErrorAction Stop
         Write-Step "Download complete: $ZipPath"
 
         # 3. Extract
