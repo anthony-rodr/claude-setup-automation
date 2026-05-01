@@ -1,4 +1,5 @@
 $ErrorActionPreference = 'Stop'
+# $GitHubPAT is injected by NinjaOne as a script variable (fine-grained PAT, Contents: Read)
 $Root   = 'C:\ProgramData\MasterElectronics'
 $LogDir = Join-Path $Root 'Logs'
 
@@ -36,10 +37,14 @@ try {
     $url = 'https://raw.githubusercontent.com/anthony-rodr/claude-setup-automation/main/scripts/Deploy-DevEnvironment.ps1'
     Write-NinjaLog "Downloading deploy script..."
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13
-    Invoke-WebRequest $url -OutFile $tmp -UseBasicParsing -ErrorAction Stop
+    $dlHeaders = @{ Authorization = "token $GitHubPAT"; 'User-Agent' = 'claude-setup-automation' }
+    Invoke-WebRequest $url -Headers $dlHeaders -OutFile $tmp -UseBasicParsing -ErrorAction Stop
     Write-NinjaLog "Deploy script downloaded. Starting installer (this takes 15-20 min)..."
 
     $startTime = Get-Date
+
+    # Pass PAT to Deploy so it can authenticate its own GitHub downloads
+    $env:GITHUB_PAT = $GitHubPAT
 
     # Start-Process avoids the pipeline-hang that occurs when Start-Job worker processes
     # spawned by Configure-ExistingProfiles hold stdout handles open after Deploy exits.
