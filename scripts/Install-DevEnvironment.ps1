@@ -850,10 +850,19 @@ function Install-ViaDirectDownload {
                         if (-not $found) { Start-Sleep -Seconds 5 }
                     }
 
-                    if ($found) {
-                        Add-MachinePath $found
-                        Add-MachinePath (Join-Path $found 'Scripts')
+                    if (-not $found) {
+                        throw "python.exe not found in any AltPath after 5-minute wait — installer likely failed or rolled back."
                     }
+
+                    # Re-verify after a short pause: guards against MSI rollback leaving
+                    # python.exe visible briefly before cleaning up.
+                    Start-Sleep -Seconds 10
+                    if (-not (Test-Path (Join-Path $found 'python.exe'))) {
+                        throw "python.exe appeared then disappeared in '$found' — MSI likely rolled back."
+                    }
+
+                    Add-MachinePath $found
+                    Add-MachinePath (Join-Path $found 'Scripts')
                 }
             }
 
@@ -1337,12 +1346,30 @@ function Install-ClaudeCode {
         Remove-Item $wingetStub -Force -ErrorAction SilentlyContinue
     }
 
+    # Node.js uses its own bundled CA list, not the Windows cert store.
+    # Export the Zscaler root CA (if present) so npm trusts Zscaler-intercepted TLS.
+    $zsCert = Get-ChildItem Cert:\LocalMachine\Root -ErrorAction SilentlyContinue |
+              Where-Object { $_.Subject -match 'Zscaler' } |
+              Select-Object -First 1
+    if ($zsCert) {
+        $zsCertPath = Join-Path $TempDir 'zscaler-ca.pem'
+        $certBytes  = $zsCert.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Cert)
+        $pemContent = "-----BEGIN CERTIFICATE-----`n" +
+                      [Convert]::ToBase64String($certBytes, 'InsertLineBreaks') +
+                      "`n-----END CERTIFICATE-----"
+        [System.IO.File]::WriteAllText($zsCertPath, $pemContent)
+        $env:NODE_EXTRA_CA_CERTS = $zsCertPath
+        Write-Log "  NODE_EXTRA_CA_CERTS set: $zsCertPath" 'DIAG'
+    } else {
+        Write-Log '  Zscaler root CA not found in Windows cert store — skipping NODE_EXTRA_CA_CERTS.' 'WARN'
+    }
+
     for ($i = 1; $i -le $MaxRetries; $i++) {
         Write-Log "  Installing Claude Code via npm attempt $i." 'DIAG'
 
         $prev = $ErrorActionPreference
         $ErrorActionPreference = 'SilentlyContinue'
-        $out = & $npmExe install -g '--prefix' $NpmPrefix '@anthropic-ai/claude-code' --loglevel=error 2>&1
+        $out = & $npmExe install -g '--prefix' $NpmPrefix '@anthropic-ai/claude-code' 2>&1
         $npmExit = $LASTEXITCODE
         $ErrorActionPreference = $prev
 
@@ -1363,9 +1390,10 @@ function Install-ClaudeCode {
 
             Write-Log '  npm succeeded but claude.cmd was not found.' 'WARN'
         } else {
-            $raw = $out -join "`n"
-            Write-Log "  npm failed attempt $i. $raw" 'WARN'
-            if ($raw -match '(?i)ECONNRESET|ETIMEDOUT|network') {
+            $raw = ($out -join "`n").Trim()
+            if ($raw.Length -gt 2000) { $raw = $raw.Substring(0, 2000) + '...(truncated)' }
+            Write-Log "  npm failed attempt $i (exit $npmExit).`n$raw" 'WARN'
+            if ($raw -match '(?i)ECONNRESET|ETIMEDOUT|network|CERT|SSL') {
                 Start-Sleep -Seconds 15
             } else {
                 Start-Sleep -Seconds 5
