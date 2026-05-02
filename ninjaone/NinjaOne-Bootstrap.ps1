@@ -37,7 +37,8 @@ try {
     $url = 'https://raw.githubusercontent.com/anthony-rodr/claude-setup-automation/main/scripts/Deploy-DevEnvironment.ps1'
     Write-NinjaLog "Downloading deploy script..."
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13
-    $dlHeaders = @{ Authorization = "token $githubpat"; 'User-Agent' = 'claude-setup-automation' }
+    $dlHeaders = @{ 'User-Agent' = 'claude-setup-automation' }
+    if ($githubpat) { $dlHeaders['Authorization'] = "token $githubpat" }
     Invoke-WebRequest $url -Headers $dlHeaders -OutFile $tmp -UseBasicParsing -ErrorAction Stop
     Write-NinjaLog "Deploy script downloaded. Starting installer (this takes 15-20 min)..."
 
