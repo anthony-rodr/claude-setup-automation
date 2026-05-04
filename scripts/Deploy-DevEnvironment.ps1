@@ -16,6 +16,7 @@
     Runs as: SYSTEM (NinjaOne context)
     Tested:  Windows 11
 #>
+param([string]$GithubPat = '')
 
 $ScriptVersion = 'GIT_COMMIT_HASH'  # Stamped by Package-Release.ps1 — copy stamped script to NinjaOne
 
@@ -34,7 +35,8 @@ $VersionsUrl     = 'https://github.com/anthony-rodr/claude-setup-automation/rele
 $VersionsOnDisk  = Join-Path $StageDir 'VERSIONS.md'
 # ──────────────────────────────────────────────────────────────────────────────
 
-# Auth headers for private repo — PAT injected by bootstrap via $env:GITHUB_PAT
+# Auth headers — PAT from -GithubPat arg (explicit) or $env:GITHUB_PAT (inherited)
+if ($GithubPat -and -not $env:GITHUB_PAT) { $env:GITHUB_PAT = $GithubPat }
 $AuthHeaders = if ($env:GITHUB_PAT) {
     @{ Authorization = "token $env:GITHUB_PAT"; 'User-Agent' = 'claude-setup-automation' }
 } else {
