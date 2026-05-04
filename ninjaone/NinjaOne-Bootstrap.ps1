@@ -1,6 +1,5 @@
 $ErrorActionPreference = 'Stop'
-# GitHub PAT — fine-grained token with Contents: Read on anthony-rodr/claude-setup-automation
-if (-not $githubpat) { $githubpat = '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' }
+# Repo is public — no PAT required for downloads
 $Root   = 'C:\ProgramData\MasterElectronics'
 $LogDir = Join-Path $Root 'Logs'
 
@@ -47,8 +46,7 @@ try {
 
     # Start-Process avoids the pipeline-hang that occurs when Start-Job worker processes
     # spawned by Configure-ExistingProfiles hold stdout handles open after Deploy exits.
-    # Pass PAT explicitly via -GithubPat — env var inheritance is unreliable under Start-Process as SYSTEM.
-    $procArgs = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $tmp, '-GithubPat', $githubpat)
+    $procArgs = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $tmp)
     $proc = Start-Process `
         -FilePath "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" `
         -ArgumentList $procArgs `
