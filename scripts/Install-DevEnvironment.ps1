@@ -400,6 +400,7 @@ $Packages = @(
         Roles     = @('Dev','All')
         Winget    = 'Python.Python.3.12'
         Choco     = 'python312'
+        ChocoArgs = @('--install-arguments', 'TargetDir="C:\Program Files\Python312"')
         VerifyCmd = 'python'
         VerifyExe = 'C:\Program Files\Python312\python.exe'
         FallbackExes = @(
@@ -448,6 +449,10 @@ $Packages = @(
                     break  # unexpected; proceed
                 }
             }
+            # Extra buffer — mutex disappears when msiexec exits but Windows Installer
+            # needs a few more seconds to fully release internal state. Without this,
+            # the Python EXE starts 1s after PS7's MSI and silently fails (error 1618).
+            Start-Sleep -Seconds 15
 
             # Remove stale Python directories that cause MSI error 1603 on re-install
             # after an incomplete rollback leaves the directory behind.
@@ -674,8 +679,10 @@ function Install-ViaChocolatey {
     for ($i = 1; $i -le $MaxRetries; $i++) {
         Write-Log "  choco upgrade $id attempt $i." 'DIAG'
 
+        $chocoArgs = @('upgrade', $id, '--yes', '--no-progress')
+        if ($Pkg.ContainsKey('ChocoArgs')) { $chocoArgs += $Pkg.ChocoArgs }
         $result = Invoke-Process -FilePath 'choco.exe' `
-            -ArgumentList @('upgrade', $id, '--yes', '--no-progress') `
+            -ArgumentList $chocoArgs `
             -TimeoutSeconds 900 `
             -Label 'choco'
 
