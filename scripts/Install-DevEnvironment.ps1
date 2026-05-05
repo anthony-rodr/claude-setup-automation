@@ -65,6 +65,7 @@ $TempDir      = Join-Path $SetupDir 'Temp'
 $NvmHome      = 'C:\ProgramData\nvm'
 $NvmSymlink   = 'C:\Program Files\nodejs'
 $NpmPrefix    = 'C:\ProgramData\npm'
+$ClaudeDir    = 'C:\ProgramData\Claude\bin'
 
 $RunningAsSystem = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name -match 'SYSTEM'
 
@@ -1311,99 +1312,127 @@ function Install-Package {
 function Install-ClaudeCode {
     Write-Log '=== Claude Code ===' 'INFO'
 
-    if (-not (Install-NodeThroughNvm)) {
-        Add-InstallError 'Claude Code was not installed because required nvm/Node setup failed.'
-        return
-    }
+    $ClaudeExe    = Join-Path $ClaudeDir 'claude.exe'
+    $DownloadBase = 'https://downloads.claude.ai/claude-code-releases'
+    $arch = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'win32-arm64' } else { 'win32-x64' }
 
-    Update-SessionPath
-
-    $nodeExe = Join-Path $NvmSymlink 'node.exe'
-    $npmExe  = Join-Path $NvmSymlink 'npm.cmd'
-
-    if (-not (Test-Path $nodeExe)) {
-        Add-InstallError "node.exe missing at required nvm symlink path: $nodeExe"
-        return
-    }
-
-    if (-not (Test-Path $npmExe)) {
-        Add-InstallError "npm.cmd missing at required nvm symlink path: $npmExe"
-        return
-    }
-
-    if (-not (Test-Path $NpmPrefix)) {
-        New-Item -ItemType Directory -Path $NpmPrefix -Force | Out-Null
-    }
-
-    Add-MachinePath $NpmPrefix
-
-    $entry = [ordered]@{
-        Name      = 'Claude Code'
-        Timestamp = (Get-Date -Format 'o')
-        Method    = 'npm'
-        WingetId  = $null
-        ChocoId   = $null
-        NpmPkg    = '@anthropic-ai/claude-code'
-        Success   = $false
-    }
-
+    # Remove broken winget stub if present from a previous install attempt
     $wingetStub = 'C:\Program Files\WinGet\Links\claude.exe'
     if (Test-Path $wingetStub) {
         Write-Log '  Removing broken winget Claude stub.' 'DIAG'
         Remove-Item $wingetStub -Force -ErrorAction SilentlyContinue
     }
 
-    # Node.js uses its own bundled CA list, not the Windows cert store.
-    # Export the Zscaler root CA (if present) so npm trusts Zscaler-intercepted TLS.
-    $zsCert = Get-ChildItem Cert:\LocalMachine\Root -ErrorAction SilentlyContinue |
-              Where-Object { $_.Subject -match 'Zscaler' } |
-              Select-Object -First 1
-    if ($zsCert) {
-        $zsCertPath = Join-Path $TempDir 'zscaler-ca.pem'
-        $certBytes  = $zsCert.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Cert)
-        $pemContent = "-----BEGIN CERTIFICATE-----`n" +
-                      [Convert]::ToBase64String($certBytes, 'InsertLineBreaks') +
-                      "`n-----END CERTIFICATE-----"
-        [System.IO.File]::WriteAllText($zsCertPath, $pemContent)
-        $env:NODE_EXTRA_CA_CERTS = $zsCertPath
-        Write-Log "  NODE_EXTRA_CA_CERTS set: $zsCertPath" 'DIAG'
-    } else {
-        Write-Log '  Zscaler root CA not found in Windows cert store — skipping NODE_EXTRA_CA_CERTS.' 'WARN'
+    # Skip if already installed at either the new direct path or old npm path
+    $existingClaude = Test-CommandAvailable -Command 'claude' -FallbackExes @(
+        $ClaudeExe, 'C:\ProgramData\npm\claude.cmd'
+    )
+    if ($existingClaude) {
+        $ver = try { (& $existingClaude --version 2>&1 | Select-Object -First 1) -replace '\s+$','' } catch { 'installed' }
+        Write-Log "  Claude Code already installed: $ver" 'OK'
+        Add-MachinePath $ClaudeDir
+        return
     }
 
-    for ($i = 1; $i -le $MaxRetries; $i++) {
-        Write-Log "  Installing Claude Code via npm attempt $i." 'DIAG'
+    New-Item -ItemType Directory -Path $ClaudeDir -Force | Out-Null
 
-        $prev = $ErrorActionPreference
-        $ErrorActionPreference = 'SilentlyContinue'
-        $out = & $npmExe install -g '--prefix' $NpmPrefix '@anthropic-ai/claude-code' 2>&1
-        $npmExit = $LASTEXITCODE
-        $ErrorActionPreference = $prev
+    $entry = [ordered]@{
+        Name      = 'Claude Code'
+        Timestamp = (Get-Date -Format 'o')
+        Method    = 'direct'
+        Success   = $false
+    }
 
-        if ($npmExit -eq 0) {
-            Add-MachinePath $NpmPrefix
-            Update-SessionPath
+    # ── Tier 1: Direct binary download from Anthropic CDN (no npm/Node required) ──
+    Write-Log "  Tier 1: Direct binary download (arch: $arch)..." 'DIAG'
+    $tier1Ok = $false
+    try {
+        $version = Invoke-RestMethod -Uri "$DownloadBase/latest" -UseBasicParsing -ErrorAction Stop
+        $version = $version.Trim()
+        Write-Log "  Latest version: $version" 'DIAG'
 
-            $claudeCmd = Test-CommandAvailable -Command 'claude.cmd' -FallbackExes @(
-                'C:\ProgramData\npm\claude.cmd'
-            )
+        $manifest = Invoke-RestMethod -Uri "$DownloadBase/$version/manifest.json" -UseBasicParsing -ErrorAction Stop
+        $expected = $manifest.platforms.$arch.checksum
+        if (-not $expected) { throw "Platform $arch not found in manifest" }
 
-            if ($claudeCmd) {
-                $ver = try { (& $claudeCmd --version 2>&1 | Select-Object -First 1) -replace '\s+$','' } catch { 'installed' }
-                Write-Log "  Claude Code installed: $ver" 'OK'
-                $entry.Success = $true
-                break
-            }
+        $tmpExe = Join-Path $TempDir "claude-$version-$arch.exe"
+        Invoke-WebRequest -Uri "$DownloadBase/$version/$arch/claude.exe" `
+            -OutFile $tmpExe -UseBasicParsing -ErrorAction Stop
 
-            Write-Log '  npm succeeded but claude.cmd was not found.' 'WARN'
-        } else {
-            $raw = ($out -join "`n").Trim()
-            if ($raw.Length -gt 2000) { $raw = $raw.Substring(0, 2000) + '...(truncated)' }
-            Write-Log "  npm failed attempt $i (exit $npmExit).`n$raw" 'WARN'
-            if ($raw -match '(?i)ECONNRESET|ETIMEDOUT|network|CERT|SSL') {
-                Start-Sleep -Seconds 15
+        $actual = (Get-FileHash -Path $tmpExe -Algorithm SHA256).Hash.ToLower()
+        if ($actual -ne $expected) {
+            Remove-Item $tmpExe -Force -ErrorAction SilentlyContinue
+            throw "Checksum mismatch — expected $expected, got $actual"
+        }
+
+        Move-Item $tmpExe $ClaudeExe -Force
+        Add-MachinePath $ClaudeDir
+        Update-SessionPath
+
+        $ver = try { (& $ClaudeExe --version 2>&1 | Select-Object -First 1) -replace '\s+$','' } catch { 'installed' }
+        Write-Log "  Claude Code installed (direct): $ver" 'OK'
+        $entry.Method  = 'direct'
+        $entry.Success = $true
+        $tier1Ok       = $true
+    } catch {
+        Write-Log "  Tier 1 direct download failed: $_" 'WARN'
+    }
+
+    # ── Tier 2: npm install fallback ──────────────────────────────────────────────
+    if (-not $tier1Ok) {
+        Write-Log '  Tier 2: npm install fallback...' 'DIAG'
+
+        if (-not (Install-NodeThroughNvm)) {
+            Add-InstallError 'Claude Code: Tier 1 (direct) and Tier 2 (npm) both failed — nvm/Node unavailable for npm fallback.'
+            $Manifest.Packages.Add($entry)
+            Save-Manifest
+            return
+        }
+
+        Update-SessionPath
+        $npmExe = Join-Path $NvmSymlink 'npm.cmd'
+
+        if (-not (Test-Path $NpmPrefix)) { New-Item -ItemType Directory -Path $NpmPrefix -Force | Out-Null }
+        Add-MachinePath $NpmPrefix
+
+        # Node.js uses its own bundled CA list — export Zscaler root CA if present
+        $zsCert = Get-ChildItem Cert:\LocalMachine\Root -ErrorAction SilentlyContinue |
+                  Where-Object { $_.Subject -match 'Zscaler' } | Select-Object -First 1
+        if ($zsCert) {
+            $zsCertPath = Join-Path $TempDir 'zscaler-ca.pem'
+            $certBytes  = $zsCert.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Cert)
+            $pemContent = "-----BEGIN CERTIFICATE-----`n" +
+                          [Convert]::ToBase64String($certBytes, 'InsertLineBreaks') +
+                          "`n-----END CERTIFICATE-----"
+            [System.IO.File]::WriteAllText($zsCertPath, $pemContent)
+            $env:NODE_EXTRA_CA_CERTS = $zsCertPath
+            Write-Log "  NODE_EXTRA_CA_CERTS set: $zsCertPath" 'DIAG'
+        }
+
+        for ($i = 1; $i -le $MaxRetries; $i++) {
+            Write-Log "  npm install attempt $i..." 'DIAG'
+            $prev = $ErrorActionPreference; $ErrorActionPreference = 'SilentlyContinue'
+            $out = & $npmExe install -g '--prefix' $NpmPrefix '@anthropic-ai/claude-code' 2>&1
+            $npmExit = $LASTEXITCODE
+            $ErrorActionPreference = $prev
+
+            if ($npmExit -eq 0) {
+                Update-SessionPath
+                $claudeCmd = Test-CommandAvailable -Command 'claude.cmd' -FallbackExes @('C:\ProgramData\npm\claude.cmd')
+                if ($claudeCmd) {
+                    $ver = try { (& $claudeCmd --version 2>&1 | Select-Object -First 1) -replace '\s+$','' } catch { 'installed' }
+                    Write-Log "  Claude Code installed (npm): $ver" 'OK'
+                    $entry.Method  = 'npm'
+                    $entry.Success = $true
+                    break
+                }
+                Write-Log '  npm succeeded but claude.cmd was not found.' 'WARN'
             } else {
-                Start-Sleep -Seconds 5
+                $raw = ($out -join "`n").Trim()
+                if ($raw.Length -gt 2000) { $raw = $raw.Substring(0, 2000) + '...(truncated)' }
+                Write-Log "  npm failed attempt $i (exit $npmExit).`n$raw" 'WARN'
+                if ($raw -match '(?i)ECONNRESET|ETIMEDOUT|network|CERT|SSL') { Start-Sleep -Seconds 15 }
+                else { break }
             }
         }
     }
@@ -1591,7 +1620,7 @@ function Show-VerificationReport {
         @{ Label = 'nvm';          Cmd = 'nvm';       Args = @('version');   Required = $true;  FallbackExes = @('C:\ProgramData\nvm\nvm.exe') }
         @{ Label = 'Node.js';      Cmd = 'node';      Args = @('--version'); Required = $true;  FallbackExes = @('C:\Program Files\nodejs\node.exe') }
         @{ Label = 'npm';          Cmd = 'npm.cmd';   Args = @('--version'); Required = $true;  FallbackExes = @('C:\Program Files\nodejs\npm.cmd') }
-        @{ Label = 'Claude Code';  Cmd = 'claude.cmd';Args = @('--version'); Required = $true;  FallbackExes = @('C:\ProgramData\npm\claude.cmd') }
+        @{ Label = 'Claude Code';  Cmd = 'claude';    Args = @('--version'); Required = $true;  FallbackExes = @('C:\ProgramData\Claude\bin\claude.exe','C:\ProgramData\npm\claude.cmd') }
         @{ Label = 'GitHub CLI';   Cmd = 'gh';        Args = @('--version'); Required = $true }
         @{ Label = 'Docker';       Cmd = 'docker';    Args = @('--version'); Required = $true }
         @{ Label = 'Python';       Cmd = 'python';    Args = @('--version'); Required = $true;  FallbackExes = @('C:\Program Files\Python312\python.exe','C:\Python312\python.exe','C:\ProgramData\chocolatey\bin\python.exe') }
