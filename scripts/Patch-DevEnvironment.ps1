@@ -145,12 +145,12 @@ $Tools = @(
         }
         GetLatest    = {
             $ProgressPreference = 'SilentlyContinue'
-            $rels = Invoke-RestMethod 'https://api.github.com/repos/python/cpython/releases?per_page=30'
+            $rels = Invoke-RestMethod 'https://api.github.com/repos/python/cpython/releases?per_page=100'
             ($rels | Where-Object { $_.tag_name -match '^v3\.12\.' -and -not $_.prerelease } | Select-Object -First 1).tag_name
         }
         Update       = {
             $ProgressPreference = 'SilentlyContinue'
-            $rels  = Invoke-RestMethod 'https://api.github.com/repos/python/cpython/releases?per_page=30'
+            $rels  = Invoke-RestMethod 'https://api.github.com/repos/python/cpython/releases?per_page=100'
             $rel   = $rels | Where-Object { $_.tag_name -match '^v3\.12\.' -and -not $_.prerelease } | Select-Object -First 1
             $asset = $rel.assets | Where-Object { $_.name -match 'amd64\.exe$' } | Select-Object -First 1
             $url   = if ($asset) { $asset.browser_download_url } else { 'https://www.python.org/ftp/python/3.12.10/python-3.12.10-amd64.exe' }
@@ -189,7 +189,7 @@ $Tools = @(
         }
         GetLatest    = {
             $ProgressPreference = 'SilentlyContinue'
-            $rels = Invoke-RestMethod 'https://api.github.com/repos/aws/aws-cli/releases?per_page=10'
+            $rels = Invoke-RestMethod 'https://api.github.com/repos/aws/aws-cli/releases?per_page=30'
             ($rels | Where-Object { $_.tag_name -match '^2\.' -and -not $_.prerelease } | Select-Object -First 1).tag_name
         }
         Update       = {
@@ -222,6 +222,9 @@ $Tools = @(
             if (-not (Test-Path $dest)) { New-Item -ItemType Directory -Path $dest -Force | Out-Null }
             Expand-Archive -Path $tmp -DestinationPath $dest -Force
             Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+            # Refresh session PATH so the post-update GetInstalled call sees the new exe
+            $env:PATH = [System.Environment]::GetEnvironmentVariable('PATH','Machine') + ';' +
+                        [System.Environment]::GetEnvironmentVariable('PATH','User')
         }
     }
 
