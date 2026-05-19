@@ -284,8 +284,6 @@ $Tools = @(
             $tmp = Join-Path $TempDir 'ClaudeDesktop.msix'
             Invoke-Download 'https://claude.ai/api/desktop/win32/x64/msix/latest/redirect' $tmp
             Add-AppxProvisionedPackage -Online -PackagePath $tmp -SkipLicense -ErrorAction Stop | Out-Null
-            Get-AppxPackage -AllUsers *Claude* -ErrorAction SilentlyContinue |
-                ForEach-Object { Add-AppxPackage -Path $_.InstallLocation -Register -DisableDevelopmentMode -ErrorAction SilentlyContinue }
             Remove-Item $tmp -Force -ErrorAction SilentlyContinue
         }
         # Claude Desktop has no version API so always update when installed
@@ -359,7 +357,11 @@ foreach ($tool in $Tools) {
             Write-Log "  Version check failed: $_ - skipping." 'WARN'
             $results.Add([pscustomobject]@{ Name=$name; Status='check failed'; Detail="$_" })
         }
-        if ($null -eq $latest) { continue }
+        if ($null -eq $latest) {
+            Write-Log "  Could not determine latest version - skipping." 'WARN'
+            $results.Add([pscustomobject]@{ Name=$name; Status='check failed'; Detail='version lookup returned null' })
+            continue
+        }
 
         if (Compare-Versions $installed $latest) {
             Write-Log "  Up to date ($installed)." 'OK'
