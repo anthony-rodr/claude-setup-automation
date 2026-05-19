@@ -1,4 +1,4 @@
-#Requires -RunAsAdministrator
+﻿#Requires -RunAsAdministrator
 <#
 .SYNOPSIS
     Version-aware patch script for Master Electronics developer environment.
@@ -235,7 +235,7 @@ $Tools = @(
         }
         SkipIf       = {
             if (-not (Test-Path (Join-Path $NvmHome 'nvm.exe'))) {
-                'nvm not installed — Node update skipped'
+                'nvm not installed - Node update skipped'
             }
         }
         Update       = {
@@ -262,7 +262,7 @@ $Tools = @(
         }
         SkipIf       = {
             $npmCmd = Join-Path $NvmSymlink 'npm.cmd'
-            if (-not (Test-Path $npmCmd)) { 'npm not available — Claude Code update skipped' }
+            if (-not (Test-Path $npmCmd)) { 'npm not available - Claude Code update skipped' }
         }
         Update       = {
             $npmCmd = Join-Path $NvmSymlink 'npm.cmd'
@@ -302,10 +302,10 @@ $Tools = @(
         }
         GetLatest    = { 'always-check' }  # Docker has no simple public version API
         SkipIf       = {
-            # Skip if Docker engine is actively running — interrupting it risks data loss
+            # Skip if Docker engine is actively running - interrupting it risks data loss
             $svc = Get-Service -Name 'com.docker.service' -ErrorAction SilentlyContinue
             if ($svc -and $svc.Status -eq 'Running') {
-                'Docker engine is running — update skipped to avoid interruption'
+                'Docker engine is running - update skipped to avoid interruption'
             }
         }
         Update       = {
@@ -319,9 +319,9 @@ $Tools = @(
 )
 
 # ── Main patch loop ───────────────────────────────────────────────────────────
-Write-Log '=' * 60
+Write-Log ('=' * 60)
 Write-Log "Patch-DevEnvironment started on $env:COMPUTERNAME"
-Write-Log '=' * 60
+Write-Log ('=' * 60)
 
 $results = [System.Collections.Generic.List[pscustomobject]]::new()
 
@@ -342,21 +342,24 @@ foreach ($tool in $Tools) {
     # Get installed version
     $installed = try { & $tool.GetInstalled } catch { $null }
     if (-not $installed) {
-        Write-Log "  Not installed — skipping." 'SKIP'
+        Write-Log "  Not installed - skipping." 'SKIP'
         $results.Add([pscustomobject]@{ Name=$name; Status='not installed'; Detail='' })
         continue
     }
 
     # For always-update tools (no reliable version API), update unconditionally
     if ($tool.ContainsKey('AlwaysUpdate') -and $tool.AlwaysUpdate) {
-        Write-Log "  Installed: $installed — updating (no version API, always refresh)." 'INFO'
+        Write-Log "  Installed: $installed - updating (no version API, always refresh)." 'INFO'
     } else {
         # Compare installed vs latest
-        $latest = try { & $tool.GetLatest } catch {
-            Write-Log "  Version check failed: $_ — skipping." 'WARN'
+        $latest = $null
+        try {
+            $latest = & $tool.GetLatest
+        } catch {
+            Write-Log "  Version check failed: $_ - skipping." 'WARN'
             $results.Add([pscustomobject]@{ Name=$name; Status='check failed'; Detail="$_" })
-            continue
         }
+        if ($null -eq $latest) { continue }
 
         if (Compare-Versions $installed $latest) {
             Write-Log "  Up to date ($installed)." 'OK'
@@ -364,7 +367,7 @@ foreach ($tool in $Tools) {
             continue
         }
 
-        Write-Log "  Update available: $installed  →  $latest" 'INFO'
+        Write-Log "  Update available: $installed -> $latest" 'INFO'
     }
 
     # Perform update
@@ -372,7 +375,7 @@ foreach ($tool in $Tools) {
         & $tool.Update
         $newVer = try { & $tool.GetInstalled } catch { '?' }
         Write-Log "  Updated successfully. Now at: $newVer" 'OK'
-        $results.Add([pscustomobject]@{ Name=$name; Status='updated'; Detail="→ $newVer" })
+        $results.Add([pscustomobject]@{ Name=$name; Status='updated'; Detail="-> $newVer" })
     } catch {
         Write-Log "  Update failed: $_" 'FAIL'
         $results.Add([pscustomobject]@{ Name=$name; Status='FAILED'; Detail="$_" })
