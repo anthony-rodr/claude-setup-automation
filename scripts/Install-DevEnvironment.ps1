@@ -419,7 +419,7 @@ $Packages = @(
             } catch { }
             'https://www.python.org/ftp/python/3.12.9/python-3.12.9-amd64.exe'
         }
-        DArgs     = '/quiet InstallAllUsers=1 PrependPath=1 Include_test=0'
+        DArgs     = '/quiet /log "C:\ProgramData\MasterElectronics\DevSetup\Temp\python-install.log" InstallAllUsers=1 PrependPath=1 Include_test=0'
         DType     = 'exe'
         AltPaths  = @(
             'C:\Program Files\Python312',
@@ -462,6 +462,55 @@ $Packages = @(
                     Write-Log "  Pre-install: removing stale Python directory: $d" 'DIAG'
                     Remove-Item $d -Recurse -Force -ErrorAction SilentlyContinue
                 }
+            }
+
+            # Remove per-user Python 3.12 installs that block a machine-wide install.
+            # Microsoft Store Python and python.org per-user installs land in
+            # %LocalAppData%\Programs\Python\Python312 — when present, the bundled
+            # python.org installer can silently abort with InstallAllUsers=1 because
+            # the same files / MSI features are already registered for a user.
+            $skip = @('Default','Default User','Public','All Users','WDAGUtilityAccount')
+            $removed = 0
+            Get-ChildItem 'C:\Users' -Directory -ErrorAction SilentlyContinue |
+                Where-Object {
+                    ($skip -notcontains $_.Name) -and
+                    (Test-Path (Join-Path $_.FullName 'NTUSER.DAT'))
+                } | ForEach-Object {
+                    foreach ($name in @('Python312','Python313')) {
+                        $perUser = Join-Path $_.FullName "AppData\Local\Programs\Python\$name"
+                        if (Test-Path $perUser) {
+                            Write-Log "  Pre-install: removing per-user Python at $perUser" 'DIAG'
+                            Remove-Item $perUser -Recurse -Force -ErrorAction SilentlyContinue
+                            $removed++
+                        }
+                    }
+                }
+
+            # Best-effort HKCU MSI registration cleanup for currently-loaded user
+            # hives (already-logged-in users). Loaded user hives appear under
+            # HKEY_USERS\<SID>. We can't safely load NTUSER.DAT for offline users
+            # here, so directory removal is enough for those — the file-conflict
+            # is what blocks the AllUsers install, not the registry stub.
+            try {
+                $hku = Get-ChildItem 'Registry::HKEY_USERS' -ErrorAction SilentlyContinue |
+                    Where-Object { $_.Name -match 'S-1-5-21' -and $_.Name -notmatch '_Classes$' }
+                foreach ($sid in $hku) {
+                    $uninstallPath = "Registry::$($sid.Name)\Software\Microsoft\Windows\CurrentVersion\Uninstall"
+                    Get-ChildItem $uninstallPath -ErrorAction SilentlyContinue |
+                        ForEach-Object {
+                            $props = Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue
+                            if ($props.DisplayName -match '^Python 3\.1[23]') {
+                                Write-Log "  Pre-install: clearing HKU MSI stub: $($props.DisplayName) under $($sid.Name)" 'DIAG'
+                                Remove-Item $_.PSPath -Recurse -Force -ErrorAction SilentlyContinue
+                            }
+                        }
+                }
+            } catch {
+                Write-Log "  Pre-install: HKU registry cleanup skipped ($_)" 'DIAG'
+            }
+
+            if ($removed -gt 0) {
+                Write-Log "  Pre-install: removed $removed per-user Python install(s)." 'OK'
             }
         }
     }
@@ -755,6 +804,18 @@ function Install-ViaDirectDownload {
         # redirected handles ("The handle is invalid"). Use DISM feature enablement
         # instead, which works reliably as SYSTEM with no console handle required.
         try {
+            # Skip if both features are already enabled — avoids redundant DISM runs on re-runs
+            $wslCheck = Invoke-Process -FilePath "$env:SystemRoot\System32\dism.exe" `
+                -ArgumentList @('/Online', '/Get-FeatureInfo', '/FeatureName:Microsoft-Windows-Subsystem-Linux') `
+                -TimeoutSeconds 60 -Label 'dism-wsl-check'
+            $vmpCheck = Invoke-Process -FilePath "$env:SystemRoot\System32\dism.exe" `
+                -ArgumentList @('/Online', '/Get-FeatureInfo', '/FeatureName:VirtualMachinePlatform') `
+                -TimeoutSeconds 60 -Label 'dism-vmp-check'
+            if (($wslCheck.Output -match '(?i)State : Enabled') -and ($vmpCheck.Output -match '(?i)State : Enabled')) {
+                Write-Log '  WSL features already enabled. Skipping.' 'OK'
+                return $true
+            }
+
             Write-Log '  Enabling WSL via DISM (Microsoft-Windows-Subsystem-Linux + VirtualMachinePlatform).' 'DIAG'
 
             $wslResult = Invoke-Process -FilePath "$env:SystemRoot\System32\dism.exe" `
@@ -1048,6 +1109,21 @@ function Install-NodeThroughNvm {
         return $false
     }
 
+    # Skip if Node is already installed and functional — avoids redundant nvm install on re-runs
+    $nvmNodeAlreadyPresent = $null -ne (
+        Get-ChildItem $NvmHome -Directory -ErrorAction SilentlyContinue |
+        Where-Object { Test-Path (Join-Path $_.FullName 'node.exe') } |
+        Select-Object -First 1
+    )
+    if ($nvmNodeAlreadyPresent -and (Test-Path (Join-Path $NvmSymlink 'npm.cmd'))) {
+        $nodeVer = try { & (Join-Path $NvmSymlink 'node.exe') --version 2>&1 } catch { 'installed' }
+        Write-Log "Node.js already installed via nvm: $nodeVer" 'OK'
+        Add-MachinePath $NvmSymlink
+        if (-not (Test-Path $NpmPrefix)) { New-Item -ItemType Directory -Path $NpmPrefix -Force | Out-Null }
+        Add-MachinePath $NpmPrefix
+        return $true
+    }
+
     Write-Log 'Installing Node.js LTS via nvm.' 'INFO'
 
     $install = Invoke-Process -FilePath $nvmExe -ArgumentList @('install','lts') -TimeoutSeconds 1200 -Label 'nvm'
@@ -1141,6 +1217,9 @@ function Install-NodeThroughNvm {
 
     Write-Log "Node.js installed via nvm: $nodeVer" 'OK'
     Write-Log "npm available via nvm: $npmVer" 'OK'
+
+    if (-not (Test-Path $NpmPrefix)) { New-Item -ItemType Directory -Path $NpmPrefix -Force | Out-Null }
+    Add-MachinePath $NpmPrefix
 
     return $true
 }
@@ -1739,6 +1818,7 @@ foreach ($pkg in $Packages) {
     Update-SessionPath
 }
 
+Install-NodeThroughNvm | Out-Null
 Install-ClaudeCode
 Configure-ExistingProfiles
 Register-LogonTask
