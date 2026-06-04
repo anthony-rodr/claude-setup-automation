@@ -1615,22 +1615,31 @@ function Invoke-VersionCheck {
         [string[]]$Args = @('--version')
     )
 
+    $tmpOut = [System.IO.Path]::GetTempFileName()
+    $tmpErr = [System.IO.Path]::GetTempFileName()
     try {
-        $job = Start-Job -ScriptBlock {
-            param($exe, $args)
-            & $exe @args 2>&1 | Select-Object -First 1
-        } -ArgumentList $Exe, $Args
+        # Run via cmd /c so .cmd/.bat files work. On timeout use taskkill /T to kill
+        # the entire process tree — prevents orphaned children from holding the parent's
+        # stdout pipe handle open (which caused 90-min hangs when Start-Job was used).
+        $cmdLine = "/c `"$Exe`" $($Args -join ' ')"
+        $proc = Start-Process -FilePath 'cmd.exe' -ArgumentList $cmdLine `
+            -RedirectStandardOutput $tmpOut -RedirectStandardError $tmpErr `
+            -NoNewWindow -PassThru -ErrorAction Stop
 
-        if ($job | Wait-Job -Timeout 8) {
-            $out = Receive-Job $job
-            Remove-Job $job -Force -ErrorAction SilentlyContinue
-            return (($out | Select-Object -First 1) -replace '\s+$','')
+        if ($proc.WaitForExit(8000)) {
+            $proc.WaitForExit()  # flush exit code on PS 5.1
+            $out = (Get-Content $tmpOut -ErrorAction SilentlyContinue |
+                    Select-Object -First 1) -replace '\s+$',''
+            if ($out) { return $out } else { return 'installed' }
         }
 
-        Remove-Job $job -Force -ErrorAction SilentlyContinue
+        # Timeout — kill entire tree so no orphaned child holds the stdout pipe open
+        & "$env:SystemRoot\System32\taskkill.exe" /T /F /PID $proc.Id 2>$null
         return 'installed (version check timed out)'
     } catch {
         return 'installed (check error)'
+    } finally {
+        Remove-Item $tmpOut, $tmpErr -Force -ErrorAction SilentlyContinue
     }
 }
 
