@@ -10,10 +10,11 @@
     - Installs required tools using bundled installers, direct downloads, Chocolatey, then winget fallback.
     - Avoids bulk Chocolatey install because it can hang under SYSTEM.
     - Uses a stable ProgramData temp directory instead of SYSTEM profile temp.
-    - Sets execution policy to RemoteSigned so npm PowerShell shims such as claude.ps1 work.
-    - Installs nvm-windows machine-wide as a required dependency.
-    - Installs Node.js through nvm.
-    - Installs Claude Code machine-wide via npm prefix C:\ProgramData\npm.
+    - Sets execution policy to RemoteSigned so PowerShell shims work.
+    - Installs nvm-windows machine-wide as a dev tool.
+    - Installs Node.js through nvm as a dev tool.
+    - Installs Claude Code machine-wide as a native binary (C:\ProgramData\Claude) from the
+      Anthropic CDN with SHA256 verification — not via npm/Node.
     - Configures existing user profiles using Configure-UserEnvironment.ps1.
     - Registers a logon scheduled task for future users.
     - Writes manifest.json for rollback.
@@ -1422,97 +1423,44 @@ function Install-ClaudeCode {
         Success   = $false
     }
 
-    # ── Tier 1: Direct binary download from Anthropic CDN (no npm/Node required) ──
-    Write-Log "  Tier 1: Direct binary download (arch: $arch)..." 'DIAG'
-    $tier1Ok = $false
-    try {
-        $version = Invoke-RestMethod -Uri "$DownloadBase/latest" -UseBasicParsing -ErrorAction Stop
-        $version = $version.Trim()
-        Write-Log "  Latest version: $version" 'DIAG'
+    # ── Native binary download from Anthropic CDN ───────────────────────────────
+    # Claude Code is a native binary, NOT an npm package — it needs neither Node nor
+    # npm to install or run. (nvm/Node/npm are still installed separately as dev
+    # tools — see Install-NodeThroughNvm in the main flow.) Retried to ride out
+    # transient network/Zscaler blips, which is the resilience the old npm tier gave.
+    Write-Log "  Native binary download (arch: $arch)..." 'DIAG'
+    for ($i = 1; $i -le $MaxRetries; $i++) {
+        try {
+            $version = Invoke-RestMethod -Uri "$DownloadBase/latest" -UseBasicParsing -ErrorAction Stop
+            $version = $version.Trim()
+            Write-Log "  Latest version: $version (attempt $i)" 'DIAG'
 
-        $manifest = Invoke-RestMethod -Uri "$DownloadBase/$version/manifest.json" -UseBasicParsing -ErrorAction Stop
-        $expected = $manifest.platforms.$arch.checksum
-        if (-not $expected) { throw "Platform $arch not found in manifest" }
+            $manifest = Invoke-RestMethod -Uri "$DownloadBase/$version/manifest.json" -UseBasicParsing -ErrorAction Stop
+            $expected = $manifest.platforms.$arch.checksum
+            if (-not $expected) { throw "Platform $arch not found in manifest" }
 
-        $tmpExe = Join-Path $TempDir "claude-$version-$arch.exe"
-        Invoke-WebRequest -Uri "$DownloadBase/$version/$arch/claude.exe" `
-            -OutFile $tmpExe -UseBasicParsing -ErrorAction Stop
+            $tmpExe = Join-Path $TempDir "claude-$version-$arch.exe"
+            Invoke-WebRequest -Uri "$DownloadBase/$version/$arch/claude.exe" `
+                -OutFile $tmpExe -UseBasicParsing -ErrorAction Stop
 
-        $actual = (Get-FileHash -Path $tmpExe -Algorithm SHA256).Hash.ToLower()
-        if ($actual -ne $expected) {
-            Remove-Item $tmpExe -Force -ErrorAction SilentlyContinue
-            throw "Checksum mismatch — expected $expected, got $actual"
-        }
-
-        Move-Item $tmpExe $ClaudeExe -Force
-        Add-MachinePath $ClaudeDir
-        Update-SessionPath
-
-        $ver = try { (& $ClaudeExe --version 2>&1 | Select-Object -First 1) -replace '\s+$','' } catch { 'installed' }
-        Write-Log "  Claude Code installed (direct): $ver" 'OK'
-        $entry.Method  = 'direct'
-        $entry.Success = $true
-        $tier1Ok       = $true
-    } catch {
-        Write-Log "  Tier 1 direct download failed: $_" 'WARN'
-    }
-
-    # ── Tier 2: npm install fallback ──────────────────────────────────────────────
-    if (-not $tier1Ok) {
-        Write-Log '  Tier 2: npm install fallback...' 'DIAG'
-
-        if (-not (Install-NodeThroughNvm)) {
-            Add-InstallError 'Claude Code: Tier 1 (direct) and Tier 2 (npm) both failed — nvm/Node unavailable for npm fallback.'
-            $Manifest.Packages.Add($entry)
-            Save-Manifest
-            return
-        }
-
-        Update-SessionPath
-        $npmExe = Join-Path $NvmSymlink 'npm.cmd'
-
-        if (-not (Test-Path $NpmPrefix)) { New-Item -ItemType Directory -Path $NpmPrefix -Force | Out-Null }
-        Add-MachinePath $NpmPrefix
-
-        # Node.js uses its own bundled CA list — export Zscaler root CA if present
-        $zsCert = Get-ChildItem Cert:\LocalMachine\Root -ErrorAction SilentlyContinue |
-                  Where-Object { $_.Subject -match 'Zscaler' } | Select-Object -First 1
-        if ($zsCert) {
-            $zsCertPath = Join-Path $TempDir 'zscaler-ca.pem'
-            $certBytes  = $zsCert.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Cert)
-            $pemContent = "-----BEGIN CERTIFICATE-----`n" +
-                          [Convert]::ToBase64String($certBytes, 'InsertLineBreaks') +
-                          "`n-----END CERTIFICATE-----"
-            [System.IO.File]::WriteAllText($zsCertPath, $pemContent)
-            $env:NODE_EXTRA_CA_CERTS = $zsCertPath
-            Write-Log "  NODE_EXTRA_CA_CERTS set: $zsCertPath" 'DIAG'
-        }
-
-        for ($i = 1; $i -le $MaxRetries; $i++) {
-            Write-Log "  npm install attempt $i..." 'DIAG'
-            $prev = $ErrorActionPreference; $ErrorActionPreference = 'SilentlyContinue'
-            $out = & $npmExe install -g '--prefix' $NpmPrefix '@anthropic-ai/claude-code' 2>&1
-            $npmExit = $LASTEXITCODE
-            $ErrorActionPreference = $prev
-
-            if ($npmExit -eq 0) {
-                Update-SessionPath
-                $claudeCmd = Test-CommandAvailable -Command 'claude.cmd' -FallbackExes @('C:\ProgramData\npm\claude.cmd')
-                if ($claudeCmd) {
-                    $ver = try { (& $claudeCmd --version 2>&1 | Select-Object -First 1) -replace '\s+$','' } catch { 'installed' }
-                    Write-Log "  Claude Code installed (npm): $ver" 'OK'
-                    $entry.Method  = 'npm'
-                    $entry.Success = $true
-                    break
-                }
-                Write-Log '  npm succeeded but claude.cmd was not found.' 'WARN'
-            } else {
-                $raw = ($out -join "`n").Trim()
-                if ($raw.Length -gt 2000) { $raw = $raw.Substring(0, 2000) + '...(truncated)' }
-                Write-Log "  npm failed attempt $i (exit $npmExit).`n$raw" 'WARN'
-                if ($raw -match '(?i)ECONNRESET|ETIMEDOUT|network|CERT|SSL') { Start-Sleep -Seconds 15 }
-                else { break }
+            $actual = (Get-FileHash -Path $tmpExe -Algorithm SHA256).Hash.ToLower()
+            if ($actual -ne $expected) {
+                Remove-Item $tmpExe -Force -ErrorAction SilentlyContinue
+                throw "Checksum mismatch — expected $expected, got $actual"
             }
+
+            Move-Item $tmpExe $ClaudeExe -Force
+            Add-MachinePath $ClaudeDir
+            Update-SessionPath
+
+            $ver = try { (& $ClaudeExe --version 2>&1 | Select-Object -First 1) -replace '\s+$','' } catch { 'installed' }
+            Write-Log "  Claude Code installed (native): $ver" 'OK'
+            $entry.Method  = 'direct'
+            $entry.Success = $true
+            break
+        } catch {
+            Write-Log "  Native download attempt $i failed: $_" 'WARN'
+            if ($i -lt $MaxRetries) { Start-Sleep -Seconds 15 }
         }
     }
 
@@ -1808,6 +1756,83 @@ if ($RunningAsSystem) {
     }
 }
 
+# ---------------------------------------------------------------------------
+# Zscaler TLS environment
+# ---------------------------------------------------------------------------
+# Node, Python, and the AWS CLI ship their own CA bundles and do NOT read the
+# Windows trust store, so even though the Zscaler root is trusted machine-wide
+# (via GPO/Intune), npm, the VS Code marketplace, pip, and AWS still fail with
+# "unable to get local issuer certificate" through Zscaler SSL inspection.
+# Export the Zscaler root to a PEM and point those tools at it via env vars.
+# (Claude Code is now a native binary and trusts the Windows store directly, so
+# it does NOT need this — but the rest of the dev stack does.)
+function Set-ZscalerCertEnv {
+    Write-Log '=== Zscaler CA / TLS env ===' 'INFO'
+
+    $zsCerts = Get-ChildItem Cert:\LocalMachine\Root -ErrorAction SilentlyContinue |
+               Where-Object { $_.Subject -match 'Zscaler' }
+    if (-not $zsCerts) {
+        Write-Log '  No Zscaler root in LocalMachine\Root — skipping (machine may not be on Zscaler).' 'DIAG'
+        return
+    }
+
+    $certDir    = 'C:\ProgramData\ZscalerCA'
+    $zscalerPem = Join-Path $certDir 'zscaler-root-ca.pem'   # Zscaler-only (health-check standard path)
+    $bundlePem  = Join-Path $certDir 'ca-bundle.pem'         # combined: public roots + Zscaler
+    New-Item -ItemType Directory -Path $certDir -Force | Out-Null
+
+    function ConvertTo-Pem {
+        param($Cert)
+        $b = $Cert.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Cert)
+        "-----BEGIN CERTIFICATE-----`n" + [Convert]::ToBase64String($b, 'InsertLineBreaks') + "`n-----END CERTIFICATE-----`n"
+    }
+
+    # Zscaler-only PEM (root + any intermediates) at the standard path the health-check validates.
+    $zsPemText = ($zsCerts | ForEach-Object { ConvertTo-Pem $_ }) -join ''
+    [System.IO.File]::WriteAllText($zscalerPem, $zsPemText)
+    Write-Log "  Wrote Zscaler PEM ($($zsCerts.Count) cert(s)): $zscalerPem" 'OK'
+
+    # Combined bundle = complete public roots + Zscaler, so pip / aws / node verify on AND off
+    # the Zscaler network (on-network Zscaler re-signs everything; off-network the real public
+    # roots apply). Public-root base = certifi's complete Mozilla set (vendored with pip, so it's
+    # present once Python is installed — the same pattern the dev machine uses). Falls back to the
+    # Windows trusted-root store export if certifi can't be found.
+    $sb = [System.Text.StringBuilder]::new()
+    $certifi = Get-ChildItem -Path @(
+        'C:\Program Files\Python*\Lib\site-packages\pip\_vendor\certifi\cacert.pem',
+        'C:\Python*\Lib\site-packages\pip\_vendor\certifi\cacert.pem',
+        "$env:LOCALAPPDATA\Programs\Python\Python*\Lib\site-packages\pip\_vendor\certifi\cacert.pem"
+    ) -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($certifi) {
+        $raw = Get-Content -LiteralPath $certifi.FullName -Raw
+        [void]$sb.Append($raw)
+        if ($raw.Length -gt 0 -and $raw[-1] -ne "`n") { [void]$sb.Append("`n") }
+        $publicSource = "certifi ($($certifi.FullName))"
+    } else {
+        Get-ChildItem Cert:\LocalMachine\Root -ErrorAction SilentlyContinue |
+            ForEach-Object { [void]$sb.Append((ConvertTo-Pem $_)) }
+        $publicSource = 'Windows LocalMachine\Root store (certifi not found)'
+    }
+    [void]$sb.Append($zsPemText)   # Always append Zscaler — certifi won't contain it.
+    # certifi ships descriptive '#' comment lines before each cert; tools accept them, but the
+    # health-check's Test-PemFile requires the file to START with the BEGIN marker. Emit only the
+    # cert blocks so the bundle is canonical PEM and passes both the tools and the health-check.
+    $blocks = [regex]::Matches($sb.ToString(), '(?s)-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----')
+    if ($blocks.Count -eq 0) { Add-InstallWarning 'Zscaler: combined CA bundle had no certificate blocks.'; return }
+    $pure = (($blocks | ForEach-Object { $_.Value }) -join "`n") + "`n"
+    [System.IO.File]::WriteAllText($bundlePem, $pure)
+    Write-Log "  Wrote combined CA bundle ($($blocks.Count) certs; public roots: $publicSource + Zscaler): $bundlePem" 'OK'
+
+    # Point Node/Python/AWS at the combined bundle, persisted machine-wide (inherited by all
+    # users/processes) and in the current session so the VS Code marketplace works during install.
+    $vars = 'NODE_EXTRA_CA_CERTS','PIP_CERT','AWS_CA_BUNDLE','REQUESTS_CA_BUNDLE','SSL_CERT_FILE'
+    foreach ($v in $vars) {
+        [System.Environment]::SetEnvironmentVariable($v, $bundlePem, 'Machine')
+        Set-Item -Path "Env:$v" -Value $bundlePem
+    }
+    Write-Log "  Set $($vars -join ', ') -> combined bundle (Machine scope + current session)." 'OK'
+}
+
 foreach ($pkg in $Packages) {
     try {
         Install-Package $pkg
@@ -1817,6 +1842,10 @@ foreach ($pkg in $Packages) {
 
     Update-SessionPath
 }
+
+# Build the combined CA bundle now that Python (certifi) is installed, before any
+# Node/VS Code marketplace work that needs the TLS env vars.
+Set-ZscalerCertEnv
 
 Install-NodeThroughNvm | Out-Null
 Install-ClaudeCode

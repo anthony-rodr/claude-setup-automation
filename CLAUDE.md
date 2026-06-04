@@ -54,8 +54,8 @@ Order of operations in `Install-DevEnvironment.ps1` (replaced session 10 with Ch
    - **Tier 2**: Direct download
    - **Tier 3**: Chocolatey (900s timeout via `Invoke-Process`)
    - **Tier 4**: winget (last resort — unreliable as SYSTEM)
-3. **nvm + Node installed as required** — `Install-NodeThroughNvm` called by `Install-ClaudeCode`; failure blocks Claude Code
-4. **Claude Code** installed via `npm install -g` to `C:\ProgramData\npm`
+3. **nvm + Node installed as dev tools** — `Install-NodeThroughNvm` runs in the main flow (independent of Claude Code); these are general dev tools, not a Claude Code dependency
+4. **Claude Code** installed as a **native binary** to `C:\ProgramData\Claude\claude.exe` — downloaded from the Anthropic CDN (`downloads.claude.ai/claude-code-releases`) with SHA256 verification, retried for transient network blips. **No npm/Node** (npm tier removed 2026-06-03). Native binary trusts the Windows cert store, so it works behind Zscaler without `NODE_EXTRA_CA_CERTS`.
 5. **Parallel profile config** — up to 3 user profiles configured simultaneously via Start-Job
 6. **Completion `msg.exe` notification** via `Send-UserNotification` (startup notification is in Deploy, not Install)
 
@@ -149,10 +149,11 @@ Removed in session 10 (were wrong for machine-wide model):
 - **Bundled nvm + PS7** — both are required; Choco caused problems (nvm no-ops as SYSTEM, PS7 hung); bundle guarantees install
 - **nvm has `Choco = $null` and `Winget = $null`** — choco nvm no-ops as SYSTEM, winget installs per-user; use nvm-noinstall.zip direct
 - **WSL2 uses `wsl.exe --install`**, not Choco or winget
-- **Claude Code installed via npm** to machine-wide prefix `C:\ProgramData\npm`
+- **Claude Code installed as a native binary** to `C:\ProgramData\Claude` from the Anthropic CDN (SHA256-verified) — not via npm/Node. nvm/Node/npm are still installed as separate dev tools.
 - **winget does NOT work as SYSTEM in NinjaOne** — stripped PATH; last resort only via Start-Job
 - **reg.exe must use full path** `$env:SystemRoot\System32\reg.exe` in SYSTEM sessions — bare `reg` fails
-- **Execution policy set to RemoteSigned** at install start — npm PS shims (claude.cmd, etc.) require it
+- **Zscaler cert env (`Set-ZscalerCertEnv`)** — runs after the package loop (needs Python/certifi). Node/Python/AWS CLI ignore the Windows trust store. Writes `C:\ProgramData\ZscalerCA\zscaler-root-ca.pem` (Zscaler-only, health-check standard path) and `ca-bundle.pem` (**combined: complete public roots from certifi + Zscaler**, canonical PEM via regex), then persists `NODE_EXTRA_CA_CERTS`/`PIP_CERT`/`AWS_CA_BUNDLE`/`REQUESTS_CA_BUNDLE`/`SSL_CERT_FILE` → the combined bundle at Machine scope + session. Combined bundle = works **on and off** the Zscaler network. Required for npm, VS Code marketplace, pip, AWS. Native Claude Code does NOT need it (trusts the Windows store). Health-checked by `Test-DevEnvironment.ps1`.
+- **Execution policy set to RemoteSigned** at install start — npm PS shims require it
 - **Deploy startup notification only** — Install removed its startup `Send-UserNotification`; Deploy fires earlier (before zip download)
 
 ## Bundle version check
