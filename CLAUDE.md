@@ -29,6 +29,13 @@ Install-DevEnvironment.ps1 (inside the zip)
 - **Deploy-DevEnvironment.ps1** — always pulled fresh from GitHub by the bootstrap. Detects new zip via VERSIONS.md staleness check before downloading.
 - **Install-DevEnvironment.ps1** — lives inside the zip. Updated by uploading a new zip to the GitHub release.
 
+## NinjaOne Automation Names
+
+| Platform | NinjaOne Script Name |
+|----------|---------------------|
+| Windows  | AIE-Claude-Deployment |
+| macOS    | AIE-CLAUDE-MacOS-Deployment |
+
 ## Deployment workflow
 
 1. Make changes to scripts, commit, push to GitHub
