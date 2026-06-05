@@ -68,6 +68,10 @@ $NvmSymlink   = 'C:\Program Files\nodejs'
 $NpmPrefix    = 'C:\ProgramData\npm'
 $ClaudeDir    = 'C:\ProgramData\Claude\bin'
 
+# Populated by Test-NvmRequired when nvm is found at a non-default path (machine NVM_HOME).
+# Used by Install-NodeThroughNvm so both functions agree on which nvm.exe to run.
+$script:ResolvedNvmExe = $null
+
 $RunningAsSystem = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name -match 'SYSTEM'
 
 foreach ($dir in @($SetupDir, $TempDir, (Split-Path $LogPath -Parent))) {
@@ -1086,40 +1090,60 @@ function Repair-NodeSymlink {
 
 function Test-NvmRequired {
     $nvmExe = Join-Path $NvmHome 'nvm.exe'
+
+    # nvm-windows installer sets NVM_HOME at machine scope — check that path too so we
+    # don't reinstall on machines that have nvm at a non-default location.
     if (-not (Test-Path $nvmExe)) {
+        $machineNvmHome = [System.Environment]::GetEnvironmentVariable('NVM_HOME', 'Machine')
+        if ($machineNvmHome -and (Test-Path (Join-Path $machineNvmHome 'nvm.exe'))) {
+            $nvmExe = Join-Path $machineNvmHome 'nvm.exe'
+        }
+    }
+
+    if (-not (Test-Path $nvmExe)) {
+        $script:ResolvedNvmExe = $null
         return $false
     }
 
-    Configure-NvmEnvironment -NvmDir $NvmHome
+    # Only reconfigure if nvm is at the script-managed path; leave existing installs alone.
+    if ((Split-Path $nvmExe -Parent).TrimEnd('\') -eq $NvmHome.TrimEnd('\')) {
+        Configure-NvmEnvironment -NvmDir $NvmHome
+    }
 
     $out = & $nvmExe version 2>&1
     if ($LASTEXITCODE -ne 0) {
         Write-Log "nvm.exe exists but failed to run: $($out -join ' ')" 'WARN'
+        $script:ResolvedNvmExe = $null
         return $false
     }
 
-    Write-Log "nvm verified: $($out | Select-Object -First 1)" 'OK'
+    $script:ResolvedNvmExe = $nvmExe
+    Write-Log "nvm verified at $nvmExe : $($out | Select-Object -First 1)" 'OK'
     return $true
 }
 
 function Install-NodeThroughNvm {
-    $nvmExe = Join-Path $NvmHome 'nvm.exe'
-
     if (-not (Test-NvmRequired)) {
         Add-InstallError 'nvm-windows is required but is not installed or not functional. Cannot install Node/Claude stack.'
         return $false
     }
 
-    # Skip if Node is already installed and functional — avoids redundant nvm install on re-runs
-    $nvmNodeAlreadyPresent = $null -ne (
-        Get-ChildItem $NvmHome -Directory -ErrorAction SilentlyContinue |
-        Where-Object { Test-Path (Join-Path $_.FullName 'node.exe') } |
-        Select-Object -First 1
-    )
-    if ($nvmNodeAlreadyPresent -and (Test-Path (Join-Path $NvmSymlink 'npm.cmd'))) {
-        $nodeVer = try { & (Join-Path $NvmSymlink 'node.exe') --version 2>&1 } catch { 'installed' }
-        Write-Log "Node.js already installed via nvm: $nodeVer" 'OK'
-        Add-MachinePath $NvmSymlink
+    # Use whichever nvm.exe Test-NvmRequired resolved (may differ from $NvmHome on existing installs).
+    $nvmExe = if ($script:ResolvedNvmExe) { $script:ResolvedNvmExe } else { Join-Path $NvmHome 'nvm.exe' }
+
+    # Skip node install if it's already present — check machine NVM_SYMLINK first (set by
+    # nvm-windows installer), then fall back to the script's managed symlink path.
+    $machineSym = [System.Environment]::GetEnvironmentVariable('NVM_SYMLINK', 'Machine')
+    $effectiveSym = if ($machineSym -and (Test-Path (Join-Path $machineSym 'node.exe'))) {
+        $machineSym
+    } elseif (Test-Path (Join-Path $NvmSymlink 'node.exe')) {
+        $NvmSymlink
+    } else { $null }
+
+    if ($effectiveSym -and (Test-Path (Join-Path $effectiveSym 'npm.cmd'))) {
+        $nodeVer = try { & (Join-Path $effectiveSym 'node.exe') --version 2>&1 | Select-Object -First 1 } catch { 'installed' }
+        Write-Log "Node.js already installed at $effectiveSym : $nodeVer" 'OK'
+        Add-MachinePath $effectiveSym
         if (-not (Test-Path $NpmPrefix)) { New-Item -ItemType Directory -Path $NpmPrefix -Force | Out-Null }
         Add-MachinePath $NpmPrefix
         return $true
@@ -1252,27 +1276,25 @@ function Install-Package {
     $fallbacks = if ($Pkg.ContainsKey('FallbackExes')) { $Pkg.FallbackExes } else { @() }
     $verifyExe = if ($Pkg.ContainsKey('VerifyExe')) { $Pkg.VerifyExe } else { $null }
 
-    if ($verifyExe -and (Test-Path $verifyExe)) {
-        if ($Pkg.Name -eq 'nvm-windows') {
-            if (Test-NvmRequired) {
-                Write-Log "  $($Pkg.Name) already installed and functional at $verifyExe. Skipping." 'OK'
-                $entry.Method = 'pre-existing'
-                $entry.Success = $true
-                $Manifest.Packages.Add($entry)
-                Save-Manifest
-                return
-            }
-        } else {
-            Write-Log "  $($Pkg.Name) already installed at $verifyExe. Skipping." 'OK'
+    # nvm-windows: call Test-NvmRequired directly so it checks machine NVM_HOME, not just
+    # the script's hardcoded path. Must come before the generic VerifyExe gate below.
+    if ($Pkg.Name -eq 'nvm-windows') {
+        if (Test-NvmRequired) {
+            Write-Log "  $($Pkg.Name) already installed and functional. Skipping." 'OK'
             $entry.Method = 'pre-existing'
             $entry.Success = $true
             $Manifest.Packages.Add($entry)
             Save-Manifest
             return
         }
-    }
-
-    if ($verifyCmd -and $Pkg.Name -ne 'nvm-windows') {
+    } elseif ($verifyExe -and (Test-Path $verifyExe)) {
+        Write-Log "  $($Pkg.Name) already installed at $verifyExe. Skipping." 'OK'
+        $entry.Method = 'pre-existing'
+        $entry.Success = $true
+        $Manifest.Packages.Add($entry)
+        Save-Manifest
+        return
+    } elseif ($verifyCmd) {
         $found = Test-CommandAvailable -Command $verifyCmd -FallbackExes $fallbacks
         if ($found) {
             $ver = try { (& $found --version 2>&1 | Select-Object -First 1) -replace '\s+$','' } catch { 'present' }
