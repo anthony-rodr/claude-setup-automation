@@ -580,7 +580,10 @@ $Packages = @(
         Roles      = @('Dev','All')
         Winget     = $null
         Choco      = $null
-        Direct     = { 'https://claude.ai/api/desktop/win32/x64/msix/latest/redirect' }
+        Direct     = {
+            $arch = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'arm64' } else { 'x64' }
+            "https://claude.ai/api/desktop/win32/$arch/msix/latest/redirect"
+        }
         DType      = 'msix'
         VerifyAppx = '*Claude*'
     }
@@ -1308,12 +1311,31 @@ function Install-Package {
     }
 
     if ($Pkg.ContainsKey('VerifyAppx') -and $Pkg.VerifyAppx) {
+        # 1. Machine-wide provisioned MSIX (our install path)
         $appx = Get-AppxProvisionedPackage -Online -ErrorAction SilentlyContinue |
             Where-Object { $_.DisplayName -like $Pkg.VerifyAppx } |
             Select-Object -First 1
 
-        if ($appx) {
-            Write-Log "  $($Pkg.Name) already provisioned ($($appx.Version)). Skipping." 'OK'
+        # 2. Per-user MSIX (user installed via Store or MSIX directly)
+        if (-not $appx) {
+            $appx = Get-AppxPackage -AllUsers -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -like $Pkg.VerifyAppx -or $_.PackageFamilyName -like $Pkg.VerifyAppx } |
+                Select-Object -First 1
+        }
+
+        # 3. EXE installer — Claude Desktop installs per-user to %LOCALAPPDATA%\AnthropicClaude
+        $exeVer = $null
+        if (-not $appx) {
+            $exeExe = Get-Item 'C:\Users\*\AppData\Local\AnthropicClaude\Claude.exe' -ErrorAction SilentlyContinue |
+                Select-Object -First 1
+            if ($exeExe) {
+                $exeVer = try { $exeExe.VersionInfo.FileVersion } catch { 'installed (EXE)' }
+            }
+        }
+
+        if ($appx -or $exeVer) {
+            $ver = if ($appx) { $appx.Version } else { $exeVer }
+            Write-Log "  $($Pkg.Name) already installed ($ver). Skipping." 'OK'
             $entry.Method = 'pre-existing'
             $entry.Success = $true
             $Manifest.Packages.Add($entry)
