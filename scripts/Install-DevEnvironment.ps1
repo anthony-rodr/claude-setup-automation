@@ -1822,9 +1822,9 @@ if ($RunningAsSystem) {
 function Set-ZscalerCertEnv {
     Write-Log '=== Zscaler CA / TLS env ===' 'INFO'
 
-    $zsCerts = Get-ChildItem Cert:\LocalMachine\Root -ErrorAction SilentlyContinue |
-               Where-Object { $_.Subject -match 'Zscaler' }
-    if (-not $zsCerts) {
+    $zsCerts = @(Get-ChildItem Cert:\LocalMachine\Root -ErrorAction SilentlyContinue |
+                 Where-Object { $_.Subject -match 'Zscaler' })
+    if ($zsCerts.Count -eq 0) {
         Write-Log '  No Zscaler root in LocalMachine\Root — skipping (machine may not be on Zscaler).' 'DIAG'
         return
     }
@@ -1898,7 +1898,7 @@ foreach ($pkg in $Packages) {
 
 # Build the combined CA bundle now that Python (certifi) is installed, before any
 # Node/VS Code marketplace work that needs the TLS env vars.
-Set-ZscalerCertEnv
+try { Set-ZscalerCertEnv } catch { Add-InstallWarning "Zscaler cert setup failed (non-fatal): $_" }
 
 Install-NodeThroughNvm | Out-Null
 Install-ClaudeCode
