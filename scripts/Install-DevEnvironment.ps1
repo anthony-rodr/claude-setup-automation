@@ -812,14 +812,12 @@ function Install-ViaDirectDownload {
         # redirected handles ("The handle is invalid"). Use DISM feature enablement
         # instead, which works reliably as SYSTEM with no console handle required.
         try {
-            # Skip if both features are already enabled — avoids redundant DISM runs on re-runs
-            $wslCheck = Invoke-Process -FilePath "$env:SystemRoot\System32\dism.exe" `
-                -ArgumentList @('/Online', '/Get-FeatureInfo', '/FeatureName:Microsoft-Windows-Subsystem-Linux') `
-                -TimeoutSeconds 60 -Label 'dism-wsl-check'
-            $vmpCheck = Invoke-Process -FilePath "$env:SystemRoot\System32\dism.exe" `
-                -ArgumentList @('/Online', '/Get-FeatureInfo', '/FeatureName:VirtualMachinePlatform') `
-                -TimeoutSeconds 60 -Label 'dism-vmp-check'
-            if (($wslCheck.Output -match '(?i)State : Enabled') -and ($vmpCheck.Output -match '(?i)State : Enabled')) {
+            # Skip if both features are already enabled — use registry (no admin/DISM needed for
+            # read-only check, so no UAC prompt on manual runs). LxssManager = WSL feature;
+            # VmCompute = VirtualMachinePlatform (Hyper-V subset required for WSL 2).
+            $wslRegEnabled = Test-Path 'HKLM:\SYSTEM\CurrentControlSet\Services\LxssManager'
+            $vmpRegEnabled = Test-Path 'HKLM:\SYSTEM\CurrentControlSet\Services\VmCompute'
+            if ($wslRegEnabled -and $vmpRegEnabled) {
                 Write-Log '  WSL features already enabled. Skipping.' 'OK'
                 return $true
             }
