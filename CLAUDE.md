@@ -8,7 +8,7 @@ This is NOT run on the dev machine. Never confuse the two.
 
 ## Machines involved
 
-- **Dev machine** (adm_arodriguez, C:\projects\claude-setup-automation): primary dev machine; SSH key at `C:\Users\adm_arodriguez\.ssh\id_ed25519`; HTTPS push broken (libcurl DLL conflict from Docker/AWS CLI) — use SSH only
+- **Dev machine** (adm_arodriguez, C:\projects\claude-setup-automation): primary dev machine; SSH key at `C:\Users\adm_arodriguez\.ssh\id_ed25519`; HTTPS push works (schannel backend configured, gh credential helper authenticated)
 - **Second machine** (zombi, C:\repo\claude-setup-automation): also used for development; SSH key at `C:\Users\zombi\.ssh\id_ed25519` added to anthony-rodr GitHub account; push via SSH to `git@github.com:anthony-rodr/claude-setup-automation.git`
 - **Test/target machines**: separate remote computers where the installer actually runs as SYSTEM via NinjaOne
 
@@ -282,7 +282,6 @@ Bundled EXEs will log `[WARN] Invoke-Process: null exit code — treating as 0` 
 - **Claude Desktop rollback unverified**: MSIX removal not explicitly checked post-rollback
 - **Python rollback** (lower priority): bundled `ME_Python_3_12.exe /quiet /uninstall` would be cleaner than registry uninstall
 - WSL2 cannot be removed without a reboot
-- libcurl DLL conflict (from Docker/AWS CLI) breaks git HTTPS — always use SSH for pushes
 - KSM licensing needed for Keeper Commander re-enable
 
 ## Dev machine state (as of session 10, 2026-04-28)
