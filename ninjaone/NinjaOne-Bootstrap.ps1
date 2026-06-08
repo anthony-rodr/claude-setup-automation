@@ -53,16 +53,57 @@ try {
         -RedirectStandardOutput $DeployOut `
         -RedirectStandardError  $DeployErr `
         -NoNewWindow -PassThru
-    $completed = $proc.WaitForExit(90 * 60 * 1000)
-    if ($completed) { $proc.WaitForExit() }  # flush exit code on PS 5.1
-    if (-not $completed) {
-        try { $proc.Kill() } catch {}
-        Write-NinjaLog 'Deploy timed out after 90 minutes and was killed.'
-        $finalExitCode = 1
-        return
+    # Stream deploy output to NinjaOne Activity in real time (3-second poll).
+    # Uses FileShare.ReadWrite so the child process can keep writing while we read.
+    $lastPos   = 0
+    $timeoutAt = (Get-Date).AddMinutes(90)
+
+    while (-not $proc.HasExited) {
+        if ((Get-Date) -gt $timeoutAt) {
+            try { $proc.Kill() } catch {}
+            Write-NinjaLog 'Deploy timed out after 90 minutes and was killed.'
+            $finalExitCode = 1
+            return
+        }
+        if (Test-Path $DeployOut) {
+            try {
+                $fs = [System.IO.File]::Open(
+                    $DeployOut,
+                    [System.IO.FileMode]::Open,
+                    [System.IO.FileAccess]::Read,
+                    [System.IO.FileShare]::ReadWrite)
+                [void]$fs.Seek($lastPos, [System.IO.SeekOrigin]::Begin)
+                $sr = [System.IO.StreamReader]::new($fs, [System.Text.Encoding]::UTF8)
+                $chunk = $sr.ReadToEnd()
+                if ($chunk.Length -gt 0) {
+                    Write-Host $chunk -NoNewline
+                    $lastPos = $fs.Position
+                }
+                $sr.Dispose()
+            } catch {}
+        }
+        Start-Sleep -Seconds 3
     }
+    $proc.WaitForExit()  # flush exit code on PS 5.1
     $exitCode = $proc.ExitCode
     if ($null -eq $exitCode) { $exitCode = 0 }
+
+    # Flush any output written after the last poll
+    if (Test-Path $DeployOut) {
+        try {
+            $fs = [System.IO.File]::Open(
+                $DeployOut,
+                [System.IO.FileMode]::Open,
+                [System.IO.FileAccess]::Read,
+                [System.IO.FileShare]::ReadWrite)
+            [void]$fs.Seek($lastPos, [System.IO.SeekOrigin]::Begin)
+            $sr = [System.IO.StreamReader]::new($fs, [System.Text.Encoding]::UTF8)
+            $chunk = $sr.ReadToEnd()
+            if ($chunk.Length -gt 0) { Write-Host $chunk -NoNewline }
+            $sr.Dispose()
+        } catch {}
+    }
+
     $duration = (Get-Date) - $startTime
     Write-NinjaLog ("Install finished in {0}m {1}s. Exit code: {2}" -f [int]$duration.TotalMinutes, $duration.Seconds, $exitCode)
 
