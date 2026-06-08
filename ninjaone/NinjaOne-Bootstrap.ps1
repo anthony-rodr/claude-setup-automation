@@ -44,6 +44,9 @@ try {
 
     $startTime = Get-Date
 
+    # Pass PAT to Deploy so it can authenticate against a private repo
+    if ($githubpat) { $env:GITHUB_PAT = $githubpat }
+
     # Start-Process avoids the pipeline-hang that occurs when Start-Job worker processes
     # spawned by Configure-ExistingProfiles hold stdout handles open after Deploy exits.
     $procArgs = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $tmp)
