@@ -69,8 +69,6 @@ git checkout -- scripts/Deploy-DevEnvironment.ps1 scripts/Rollback-DevEnvironmen
 
 The next time NinjaOne runs the automation, Deploy detects the changed `VERSIONS.md` and downloads the new zip automatically.
 
-> **Note:** Git HTTPS push is broken on the dev machine (libcurl DLL conflict from Docker/AWS CLI). Always use SSH.
-
 ### Updating the Bootstrap
 
 The Bootstrap is pasted directly into NinjaOne and is not inside the zip. To update it:
