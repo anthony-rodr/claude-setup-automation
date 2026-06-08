@@ -34,18 +34,14 @@ try {
     Write-NinjaLog "Bootstrap started. Computer: $env:COMPUTERNAME"
     Write-NinjaLog "Running as: $([System.Security.Principal.WindowsIdentity]::GetCurrent().Name)"
 
-    $url = 'https://raw.githubusercontent.com/anthony-rodr/claude-setup-automation/main/scripts/Deploy-DevEnvironment.ps1'
+    $url = 'https://claude-deploy-scripts.s3.us-east-2.amazonaws.com/Windows/Deploy-DevEnvironment.ps1'
     Write-NinjaLog "Downloading deploy script..."
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13
     $dlHeaders = @{ 'User-Agent' = 'claude-setup-automation' }
-    if ($githubpat) { $dlHeaders['Authorization'] = "token $githubpat" }
     Invoke-WebRequest $url -Headers $dlHeaders -OutFile $tmp -UseBasicParsing -ErrorAction Stop
     Write-NinjaLog "Deploy script downloaded. Starting installer (this takes 15-20 min)..."
 
     $startTime = Get-Date
-
-    # Pass PAT to Deploy so it can authenticate against a private repo
-    if ($githubpat) { $env:GITHUB_PAT = $githubpat }
 
     # Start-Process avoids the pipeline-hang that occurs when Start-Job worker processes
     # spawned by Configure-ExistingProfiles hold stdout handles open after Deploy exits.

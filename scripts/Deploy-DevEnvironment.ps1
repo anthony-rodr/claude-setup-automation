@@ -21,17 +21,14 @@ param([string]$GithubPat = '')
 $ScriptVersion = 'GIT_COMMIT_HASH'  # Stamped by Package-Release.ps1 — copy stamped script to NinjaOne
 
 # ── Configuration ─────────────────────────────────────────────────────────────
-# Stable URL — always points to the latest release asset named claude-setup-automation.zip.
-# To deploy a new version: replace the asset on the GitHub release (keep the same filename).
-# GitHub Releases:  https://github.com/anthony-rodr/claude-setup-automation/releases/latest/download/claude-setup-automation.zip
-# Azure Blob (future): https://YOUR_ACCOUNT.blob.core.windows.net/YOUR_CONTAINER/claude-setup-automation.zip
-$PackageUrl = 'https://github.com/anthony-rodr/claude-setup-automation/releases/latest/download/claude-setup-automation.zip'
+# Stable URLs — update these when moving between environments (sandbox → production).
+$PackageUrl = 'https://claude-deploy-scripts.s3.us-east-2.amazonaws.com/Windows/claude-setup-automation.zip'
 
 # Where to stage the downloaded zip and extracted contents
 $StageDir        = 'C:\ProgramData\MasterElectronics\Deploy'
 $ZipPath         = Join-Path $StageDir 'setup.zip'
 $ExtractDir      = Join-Path $StageDir 'package'
-$VersionsUrl     = 'https://github.com/anthony-rodr/claude-setup-automation/releases/latest/download/VERSIONS.md'
+$VersionsUrl     = 'https://claude-deploy-scripts.s3.us-east-2.amazonaws.com/Windows/VERSIONS.md'
 $VersionsOnDisk  = Join-Path $StageDir 'VERSIONS.md'
 # ──────────────────────────────────────────────────────────────────────────────
 
