@@ -547,6 +547,7 @@ $Packages = @(
         Winget    = 'Docker.DockerDesktop'
         Choco     = 'docker-desktop'
         VerifyCmd = 'docker'
+        VerifyExe = 'C:\Program Files\Docker\Docker\Docker Desktop.exe'
         Direct    = { 'https://desktop.docker.com/win/main/amd64/Docker%20Desktop%20Installer.exe' }
         DArgs     = 'install --quiet --accept-license --backend=wsl-2'
         DType     = 'exe-args'
