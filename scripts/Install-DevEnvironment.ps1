@@ -1409,8 +1409,13 @@ function Install-Package {
     }
 
     if ($entry.Success -and $verifyExe -and -not (Test-Path $verifyExe)) {
-        Write-Log "  $($Pkg.Name) reported success but required exe is missing: $verifyExe" 'WARN'
-        $entry.Success = $false
+        $exeName  = Split-Path $verifyExe -Leaf
+        $altFound = $Pkg.ContainsKey('AltPaths') -and
+                    ($Pkg.AltPaths | Where-Object { Test-Path (Join-Path $_ $exeName) } | Select-Object -First 1)
+        if (-not $altFound) {
+            Write-Log "  $($Pkg.Name) reported success but required exe is missing: $verifyExe" 'WARN'
+            $entry.Success = $false
+        }
     }
 
     if ($entry.Success -and $Pkg.Name -eq 'nvm-windows') {
