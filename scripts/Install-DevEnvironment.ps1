@@ -533,26 +533,6 @@ $Packages = @(
         DType     = 'msi'
     }
     @{
-        Name   = 'Windows Subsystem for Linux 2'
-        Roles  = @('Dev','All')
-        Winget = 'Microsoft.WSL'
-        Choco  = $null
-        Direct = $null
-        DArgs  = '--install --no-distribution'
-        DType  = 'wsl-install'
-    }
-    @{
-        Name      = 'Docker Desktop'
-        Roles     = @('Dev','All')
-        Winget    = 'Docker.DockerDesktop'
-        Choco     = 'docker-desktop'
-        VerifyCmd = 'docker'
-        VerifyExe = 'C:\Program Files\Docker\Docker\Docker Desktop.exe'
-        Direct    = { 'https://desktop.docker.com/win/main/amd64/Docker%20Desktop%20Installer.exe' }
-        DArgs     = 'install --quiet --accept-license --backend=wsl-2'
-        DType     = 'exe-args'
-    }
-    @{
         Name      = 'AWS CLI v2'
         Roles     = @('CloudOps','All')
         Winget    = 'Amazon.AWSCLI'

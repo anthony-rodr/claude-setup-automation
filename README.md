@@ -17,7 +17,6 @@ Automated developer environment installer for Master Electronics. Deployed via *
 | GitHub CLI | Bundled |
 | AWS CLI v2 | Bundled |
 | Terraform | Bundled |
-| Docker Desktop | Chocolatey + direct fallback |
 | Claude Desktop | Direct MSIX download |
 | Claude Code | Native binary from Anthropic CDN |
 | WSL2 | `wsl.exe --install` |

@@ -195,8 +195,6 @@ Test-ToolVersion -Name 'Python 3.12'   -ExePath 'C:\Program Files\Python312\pyth
 Test-ToolVersion -Name 'GitHub CLI'    -ExePath 'C:\Program Files\GitHub CLI\gh.exe'                -ExpectedPattern 'gh version'
 Test-ToolVersion -Name 'AWS CLI v2'    -ExePath 'C:\Program Files\Amazon\AWSCLIV2\aws.exe'          -ExpectedPattern 'aws-cli'
 Test-ToolVersion -Name 'Terraform'     -ExePath 'C:\Program Files\Terraform\terraform.exe' -VersionArgs @('version') -ExpectedPattern 'Terraform v'
-Test-ToolVersion -Name 'Docker'        -ExePath 'C:\Program Files\Docker\Docker\resources\bin\docker.exe' -ExpectedPattern 'Docker version'
-
 # Claude Desktop (MSIX provisioned, machine-wide)
 try {
     $claudePkg = Get-AppxProvisionedPackage -Online -ErrorAction Stop |
@@ -214,25 +212,6 @@ try {
         -Detail "AppX query failed: $($_.Exception.Message)"
 }
 
-# WSL2 — special-case because --status can hang on broken kernel
-$wslPath = "$env:SystemRoot\System32\wsl.exe"
-if (Test-Path -LiteralPath $wslPath) {
-    $r = Invoke-WithTimeout -Script { & "$env:SystemRoot\System32\wsl.exe" --status 2>&1 } -TimeoutSeconds 10
-    if ($r.TimedOut) {
-        Add-CheckResult -Category 'Tool Versions' -Name 'WSL2' -Status 'WARN' `
-            -Detail 'wsl --status timed out (kernel may be broken)'
-    } elseif ($r.Output) {
-        $firstLine = $r.Output.Split("`n")[0].Trim()
-        Add-CheckResult -Category 'Tool Versions' -Name 'WSL2' -Status 'OK' -Detail $firstLine
-    } else {
-        Add-CheckResult -Category 'Tool Versions' -Name 'WSL2' -Status 'WARN' `
-            -Detail 'wsl --status returned empty output'
-    }
-} else {
-    Add-CheckResult -Category 'Tool Versions' -Name 'WSL2' -Status 'FAIL' `
-        -Detail 'wsl.exe not found in System32'
-}
-
 # ---------------------------------------------------------------------------
 # 2. PATH resolution — does the bare command resolve from machine PATH?
 # ---------------------------------------------------------------------------
@@ -248,7 +227,6 @@ Test-CommandResolvesOnPath -CommandName 'pip'        -ExpectedSourceContains 'Py
 Test-CommandResolvesOnPath -CommandName 'gh'         -ExpectedSourceContains 'GitHub CLI'
 Test-CommandResolvesOnPath -CommandName 'aws'        -ExpectedSourceContains 'AWSCLIV2'
 Test-CommandResolvesOnPath -CommandName 'terraform'  -ExpectedSourceContains 'Terraform'
-Test-CommandResolvesOnPath -CommandName 'docker'     -ExpectedSourceContains 'Docker'
 
 # ---------------------------------------------------------------------------
 # 3. Functional probes — exercise the tool, not just check the version
@@ -299,21 +277,6 @@ if (Test-Path -LiteralPath $claudeCmd) {
         Add-CheckResult -Category 'Functional Probes' -Name 'Claude Code runs' -Status 'OK' -Detail $r.Output.Trim()
     } else {
         Add-CheckResult -Category 'Functional Probes' -Name 'Claude Code runs' -Status 'FAIL' -Detail $r.Output
-    }
-}
-
-# Docker daemon — separate from CLI version check. May be down without breaking anything else.
-$dockerExe = 'C:\Program Files\Docker\Docker\resources\bin\docker.exe'
-if (Test-Path -LiteralPath $dockerExe) {
-    $r = Invoke-WithTimeout -Script {
-        & 'C:\Program Files\Docker\Docker\resources\bin\docker.exe' info --format '{{.ServerVersion}}' 2>&1
-    } -TimeoutSeconds 8
-    if ($r.TimedOut) {
-        Add-CheckResult -Category 'Functional Probes' -Name 'Docker daemon' -Status 'WARN' -Detail 'docker info timed out (daemon down or starting)'
-    } elseif ($r.Output -match '^\d+') {
-        Add-CheckResult -Category 'Functional Probes' -Name 'Docker daemon' -Status 'OK' -Detail "Server v$($r.Output.Trim())"
-    } else {
-        Add-CheckResult -Category 'Functional Probes' -Name 'Docker daemon' -Status 'WARN' -Detail "Daemon not responding: $($r.Output.Split("`n")[0])"
     }
 }
 
