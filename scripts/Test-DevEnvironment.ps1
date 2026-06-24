@@ -443,7 +443,7 @@ foreach ($p in $expectedPaths) {
 # ---------------------------------------------------------------------------
 # 6. Install manifest
 # ---------------------------------------------------------------------------
-$SetupDir     = 'C:\ProgramData\MasterElectronics\DevSetup'
+$SetupDir     = 'C:\ProgramData\AIE\DevSetup'
 $ManifestPath = Join-Path $SetupDir 'manifest.json'
 
 if (Test-Path -LiteralPath $ManifestPath) {
@@ -540,7 +540,7 @@ foreach ($p in $userProfiles) {
 # ---------------------------------------------------------------------------
 # 9. Logon scheduled task
 # ---------------------------------------------------------------------------
-$task = Get-ScheduledTask -TaskName 'MasterElectronics-ConfigureUserEnvironment' `
+$task = Get-ScheduledTask -TaskName 'AIE-ConfigureUserEnvironment' `
     -ErrorAction SilentlyContinue
 if ($task) {
     $info = $task | Get-ScheduledTaskInfo
@@ -561,11 +561,11 @@ if ($task) {
         $status = 'WARN'
     }
     Add-CheckResult -Category 'Scheduled Task' `
-        -Name 'MasterElectronics-ConfigureUserEnvironment' `
+        -Name 'AIE-ConfigureUserEnvironment' `
         -Status $status -Detail $detail
 } else {
     Add-CheckResult -Category 'Scheduled Task' `
-        -Name 'MasterElectronics-ConfigureUserEnvironment' `
+        -Name 'AIE-ConfigureUserEnvironment' `
         -Status 'FAIL' -Detail 'Task not registered'
 }
 

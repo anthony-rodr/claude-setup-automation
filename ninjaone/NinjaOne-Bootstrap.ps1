@@ -1,6 +1,12 @@
+# Lambda URL is permanent — never needs updating in NinjaOne.
+$LambdaUrl = 'https://dqjiychkx3ockgvn24rscxkmaq0wwfat.lambda-url.us-east-2.on.aws/'
+
+# NinjaOne passes Script Variables as environment variables — no param() block.
+$ApiKey = ($env:lambdakey).Trim()
 $ErrorActionPreference = 'Stop'
-# Repo is public — no PAT required for downloads
-$Root   = 'C:\ProgramData\MasterElectronics'
+if (-not $ApiKey) { throw 'lambdakey script variable is not configured in NinjaOne.' }
+
+$Root   = 'C:\ProgramData\AIE'
 $LogDir = Join-Path $Root 'Logs'
 
 New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
@@ -18,7 +24,15 @@ function Write-NinjaLog {
     Write-Host $line
 }
 
-$MutexName     = 'Global\MasterElectronics-DevEnvironment-Install'
+function Get-LambdaPresignedUrl {
+    param([string]$File)
+    $r   = Invoke-WebRequest -Uri "${LambdaUrl}?file=$File" -Headers @{ 'x-api-key' = $ApiKey; 'User-Agent' = 'aie-dev-setup' } -UseBasicParsing -ErrorAction Stop
+    $url = ($r.Content | ConvertFrom-Json).url
+    if (-not $url) { throw "Lambda returned no URL for file=$File" }
+    return $url
+}
+
+$MutexName     = 'Global\AIE-DevEnvironment-Install'
 $mutex         = New-Object System.Threading.Mutex($false, $MutexName)
 $hasMutex      = $false
 $finalExitCode = 1
@@ -26,7 +40,7 @@ $finalExitCode = 1
 try {
     $hasMutex = $mutex.WaitOne(0)
     if (-not $hasMutex) {
-        Write-NinjaLog 'Another Master Electronics Dev Environment install is already running. Exiting.'
+        Write-NinjaLog 'Another AIE Dev Environment install is already running. Exiting.'
         $finalExitCode = 0
         return
     }
@@ -34,18 +48,39 @@ try {
     Write-NinjaLog "Bootstrap started. Computer: $env:COMPUTERNAME"
     Write-NinjaLog "Running as: $([System.Security.Principal.WindowsIdentity]::GetCurrent().Name)"
 
-    $url = 'https://claude-deploy-scripts.s3.us-east-2.amazonaws.com/Windows/Deploy-DevEnvironment.ps1'
-    Write-NinjaLog "Downloading deploy script..."
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13
-    $dlHeaders = @{ 'User-Agent' = 'claude-setup-automation' }
-    Invoke-WebRequest $url -Headers $dlHeaders -OutFile $tmp -UseBasicParsing -ErrorAction Stop
-    Write-NinjaLog "Deploy script downloaded. Starting installer (this takes 15-20 min)..."
+    $dlHeaders = @{ 'User-Agent' = 'aie-dev-setup' }
+
+    # Resolve fresh pre-signed S3 URLs from Lambda — no URL rotation needed in NinjaOne.
+    Write-NinjaLog "Resolving download URLs via Lambda..."
+    $VersionsUrl = Get-LambdaPresignedUrl 'versions'
+    $DeployUrl   = Get-LambdaPresignedUrl 'deploy'
+    $PackageUrl  = Get-LambdaPresignedUrl 'package'
+    Write-NinjaLog "URLs resolved."
+
+    # Fetch VERSIONS.md first to get the expected Deploy script hash before downloading it.
+    Write-NinjaLog "Fetching VERSIONS.md for integrity check..."
+    $versionsContent    = (Invoke-WebRequest $VersionsUrl -Headers $dlHeaders -UseBasicParsing -ErrorAction Stop).Content
+    $expectedDeployHash = if ($versionsContent -match '(?m)DeploySHA256:\s*([a-fA-F0-9]{64})') { $Matches[1].ToLower() } else { $null }
+    if (-not $expectedDeployHash) {
+        throw 'DeploySHA256 not found in VERSIONS.md. Re-run Package-Release.ps1 and re-upload all S3 files before deploying.'
+    }
+
+    Write-NinjaLog "Downloading deploy script..."
+    Invoke-WebRequest $DeployUrl -Headers $dlHeaders -OutFile $tmp -UseBasicParsing -ErrorAction Stop
+    $actualDeployHash = (Get-FileHash -Path $tmp -Algorithm SHA256).Hash.ToLower()
+    if ($actualDeployHash -ne $expectedDeployHash) {
+        throw "Deploy script integrity check FAILED.`nExpected: $expectedDeployHash`nActual  : $actualDeployHash"
+    }
+    Write-NinjaLog "Deploy script verified (SHA256 OK). Starting installer (this takes 15-20 min)..."
 
     $startTime = Get-Date
 
     # Start-Process avoids the pipeline-hang that occurs when Start-Job worker processes
     # spawned by Configure-ExistingProfiles hold stdout handles open after Deploy exits.
     $procArgs = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $tmp)
+    if ($PackageUrl)  { $procArgs += @('-PackageUrl',  $PackageUrl)  }
+    if ($VersionsUrl) { $procArgs += @('-VersionsUrl', $VersionsUrl) }
     $proc = Start-Process `
         -FilePath "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" `
         -ArgumentList $procArgs `
@@ -75,8 +110,10 @@ try {
                 $sr = [System.IO.StreamReader]::new($fs, [System.Text.Encoding]::UTF8)
                 $chunk = $sr.ReadToEnd()
                 if ($chunk.Length -gt 0) {
-                    Write-Host $chunk -NoNewline
                     $lastPos = $fs.Position
+                    # Filter [DIAG] lines — kept in log files, too noisy for NinjaOne activity view
+                    $filtered = ($chunk -split "`r?`n" | Where-Object { $_ -notmatch '\]\[DIAG\]' }) -join "`n"
+                    if ($filtered.Trim()) { Write-Host $filtered }
                 }
                 $sr.Dispose()
             } catch {}
@@ -98,7 +135,10 @@ try {
             [void]$fs.Seek($lastPos, [System.IO.SeekOrigin]::Begin)
             $sr = [System.IO.StreamReader]::new($fs, [System.Text.Encoding]::UTF8)
             $chunk = $sr.ReadToEnd()
-            if ($chunk.Length -gt 0) { Write-Host $chunk -NoNewline }
+            if ($chunk.Length -gt 0) {
+                $filtered = ($chunk -split "`r?`n" | Where-Object { $_ -notmatch '\]\[DIAG\]' }) -join "`n"
+                if ($filtered.Trim()) { Write-Host $filtered }
+            }
             $sr.Dispose()
         } catch {}
     }
@@ -155,6 +195,13 @@ try {
     Write-NinjaLog "Full install log   : $installLog"
     Write-NinjaLog "Full deploy output : $DeployOut"
     Write-NinjaLog "Full deploy errors : $DeployErr"
+    Write-NinjaLog ('=' * 64)
+    if ($exitCode -eq 0) {
+        Write-NinjaLog "RESULT: INSTALL SUCCEEDED on $env:COMPUTERNAME"
+    } else {
+        Write-NinjaLog "RESULT: INSTALL FAILED (exit $exitCode) on $env:COMPUTERNAME — see WARNINGS / FAILURES above"
+    }
+    Write-NinjaLog ('=' * 64)
     Write-NinjaLog "Bootstrap exiting with code $exitCode"
 
     $finalExitCode = $exitCode

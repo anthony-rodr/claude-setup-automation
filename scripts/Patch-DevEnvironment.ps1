@@ -1,7 +1,7 @@
 ﻿#Requires -RunAsAdministrator
 <#
 .SYNOPSIS
-    Version-aware patch script for Master Electronics developer environment.
+    Version-aware patch script for the AIE developer environment.
 
 .DESCRIPTION
     For each installed tool, checks the currently installed version against the
@@ -12,13 +12,13 @@
     recurring schedule (weekly / monthly).  Runs as SYSTEM via NinjaOne.
 
 .NOTES
-    Logs to: C:\ProgramData\MasterElectronics\patch.log
-    Summary: C:\ProgramData\MasterElectronics\patch-summary.log
+    Logs to: C:\ProgramData\AIE\patch.log
+    Summary: C:\ProgramData\AIE\patch-summary.log
 #>
 
 $ErrorActionPreference = 'Stop'
 
-$Root       = 'C:\ProgramData\MasterElectronics'
+$Root       = 'C:\ProgramData\AIE'
 $TempDir    = Join-Path $Root 'Patch\Temp'
 $LogPath    = Join-Path $Root 'patch.log'
 $SummaryPath = Join-Path $Root 'patch-summary.log'

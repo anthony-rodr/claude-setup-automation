@@ -1,7 +1,9 @@
-# Bundled Installer Versions
+﻿# Bundled Installer Versions
 
-Built: 2026-06-17 19:23:43 UTC
-Commit: caf7171
+Built: 2026-06-22 23:34:34 UTC
+Commit: abffb60
+ZipSHA256: 581dc20a21f01bb4d11f6844ecb20fb6272d16615e3dccbef9356e7068010974
+DeploySHA256: 58fc93f0547a03f1cc2ab4b034b6e98ee950a4004f297361922c6a132fb0d02f
 
 | Package | Version | File | Size |
 |---------|---------|------|------|
@@ -9,11 +11,11 @@ Commit: caf7171
 | Git for Windows | v2.54.0.windows.1 | ME_Git_for_Windows.exe | 62.2 MB |
 | AWS CLI v2 | latest | ME_AWS_CLI_v2.msi | 45.5 MB |
 | Python 3.12 | 3.12.10-fallback | ME_Python_3_12.exe | 25.7 MB |
-| GitHub CLI | v2.94.0 | ME_GitHub_CLI.msi | 14 MB |
+| GitHub CLI | v2.95.0 | ME_GitHub_CLI.msi | 14 MB |
 | Terraform | 1.15.6 | ME_Terraform.zip | 33.7 MB |
 | nvm-windows | 1.2.2 | ME_nvm_windows.zip | 6 MB |
 | PowerShell 7 | v7.6.3 | ME_PowerShell_7.msi | 109.6 MB |
-| Node.js LTS | v24.16.0 | ME_Node_LTS.zip | 34.8 MB |
+| Node.js LTS | v24.17.0 | ME_Node_LTS.zip | 34.8 MB |
 
 **Not bundled** (downloaded at runtime by the installer):
 - Docker Desktop  (~600 MB - Chocolatey + direct fallback)

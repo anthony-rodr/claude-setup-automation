@@ -1,7 +1,7 @@
 ﻿#Requires -RunAsAdministrator
 <#
 .SYNOPSIS
-    Silent developer environment installer for Master Electronics.
+    Silent developer environment installer.
 
 .DESCRIPTION
     Full developer environment deployment script intended to run from NinjaOne as SYSTEM.
@@ -46,9 +46,9 @@ param(
 
     [int]$MaxRetries = 3,
 
-    [string]$LogPath = 'C:\ProgramData\MasterElectronics\DevSetup\install.log',
+    [string]$LogPath = 'C:\ProgramData\AIE\DevSetup\install.log',
 
-    [string]$ManifestPath = 'C:\ProgramData\MasterElectronics\DevSetup\manifest.json'
+    [string]$ManifestPath = 'C:\ProgramData\AIE\DevSetup\manifest.json'
 )
 
 Set-StrictMode -Version Latest
@@ -60,7 +60,7 @@ $ErrorActionPreference = 'Stop'
 $SetupDir     = Split-Path $ManifestPath -Parent
 $ConfigScript = Join-Path $SetupDir 'Configure-UserEnvironment.ps1'
 $ExtListFile  = Join-Path $SetupDir 'vscode-extensions.json'
-$TaskName     = 'MasterElectronics-ConfigureUserEnvironment'
+$TaskName     = 'AIE-ConfigureUserEnvironment'
 $TempDir      = Join-Path $SetupDir 'Temp'
 
 $NvmHome      = 'C:\ProgramData\nvm'
@@ -424,7 +424,7 @@ $Packages = @(
             } catch { }
             'https://www.python.org/ftp/python/3.12.9/python-3.12.9-amd64.exe'
         }
-        DArgs     = '/quiet /log "C:\ProgramData\MasterElectronics\DevSetup\Temp\python-install.log" InstallAllUsers=1 PrependPath=1 Include_test=0'
+        DArgs     = '/quiet /log "C:\ProgramData\AIE\DevSetup\Temp\python-install.log" InstallAllUsers=1 PrependPath=1 Include_test=0'
         DType     = 'exe'
         AltPaths  = @(
             'C:\Program Files\Python312',
@@ -579,8 +579,7 @@ $VsCodeExtensions = @(
     'eamodio.gitlens',
     'ms-vscode-remote.remote-wsl',
     'esbenp.prettier-vscode',
-    'dbaeumer.vscode-eslint',
-    'ms-azuretools.vscode-docker'
+    'dbaeumer.vscode-eslint'
 )
 
 # ---------------------------------------------------------------------------
@@ -826,7 +825,7 @@ function Install-ViaDirectDownload {
                 # login. Register a one-shot startup task as SYSTEM to run
                 # wsl --update + wsl --set-default-version 2 after the reboot.
                 try {
-                    $wslTaskName = 'MasterElectronics-WSLPostReboot'
+                    $wslTaskName = 'AIE-WSLPostReboot'
                     $wslCmd = 'wsl.exe --update --web-download; wsl.exe --set-default-version 2; ' +
                               "Unregister-ScheduledTask -TaskName '$wslTaskName' -Confirm:`$false -ErrorAction SilentlyContinue"
                     $wslAction   = New-ScheduledTaskAction -Execute 'powershell.exe' `
@@ -1463,8 +1462,8 @@ function Install-ClaudeCode {
             $version = $version.Trim()
             Write-Log "  Latest version: $version (attempt $i)" 'DIAG'
 
-            $manifest = Invoke-RestMethod -Uri "$DownloadBase/$version/manifest.json" -UseBasicParsing -ErrorAction Stop
-            $expected = $manifest.platforms.$arch.checksum
+            $cdnManifest = Invoke-RestMethod -Uri "$DownloadBase/$version/manifest.json" -UseBasicParsing -ErrorAction Stop
+            $expected = $cdnManifest.platforms.$arch.checksum
             if (-not $expected) { throw "Platform $arch not found in manifest" }
 
             $tmpExe = Join-Path $TempDir "claude-$version-$arch.exe"
@@ -1624,7 +1623,7 @@ function Register-LogonTask {
 
     Register-ScheduledTask `
         -TaskName $TaskName `
-        -Description 'Configures Master Electronics developer tools for each user on first logon.' `
+        -Description 'Configures developer tools for each user on first logon.' `
         -Action $action `
         -Trigger $trigger `
         -Settings $settings `
@@ -1686,7 +1685,6 @@ function Show-VerificationReport {
         @{ Label = 'npm';          Cmd = 'npm.cmd';   Args = @('--version'); Required = $true;  FallbackExes = @('C:\Program Files\nodejs\npm.cmd') }
         @{ Label = 'Claude Code';  Cmd = 'claude';    Args = @('--version'); Required = $true;  FallbackExes = @('C:\ProgramData\Claude\bin\claude.exe','C:\ProgramData\npm\claude.cmd') }
         @{ Label = 'GitHub CLI';   Cmd = 'gh';        Args = @('--version'); Required = $true }
-        @{ Label = 'Docker';       Cmd = 'docker';    Args = @('--version'); Required = $true }
         @{ Label = 'Python';       Cmd = 'python';    Args = @('--version'); Required = $true;  FallbackExes = @('C:\Program Files\Python312\python.exe','C:\Python312\python.exe','C:\ProgramData\chocolatey\bin\python.exe') }
         @{ Label = 'AWS CLI';      Cmd = 'aws';       Args = @('--version'); Required = $false }
         @{ Label = 'Terraform';    Cmd = 'terraform'; Args = @('--version'); Required = $false }
@@ -1764,7 +1762,7 @@ function Show-VerificationReport {
 # Main
 # ---------------------------------------------------------------------------
 Write-Log ('=' * 64) 'INFO'
-Write-Log '  Master Electronics - Developer Environment Installer' 'INFO'
+Write-Log '  AIE — Developer Environment Installer' 'INFO'
 Write-Log ('=' * 64) 'INFO'
 Write-Log "Role: $Role | MaxRetries: $MaxRetries | RunningAsSystem: $RunningAsSystem" 'INFO'
 Write-Log "Log : $LogPath" 'INFO'
@@ -1914,7 +1912,7 @@ Write-Log "Packages attempted : $($Manifest.Packages.Count)" 'INFO'
 Write-Log "Warnings           : $warnCount" $(if ($warnCount -gt 0) { 'WARN' } else { 'OK' })
 Write-Log "Failures           : $failCount" $(if ($failCount -gt 0) { 'FAIL' } else { 'OK' })
 
-Send-UserNotification -Message 'IT Update: Developer tool installation is complete. Please sign out and back in, or restart your computer, before using Claude Code, PowerShell 7, npm, Docker, or VS Code.' -TimeoutSeconds 120
+Send-UserNotification -Message 'IT Update: Developer tool installation is complete. Please sign out and back in, or restart your computer, before using Claude Code, PowerShell 7, npm, or VS Code.' -TimeoutSeconds 120
 
 if ($warnCount -gt 0) {
     Write-Log '' 'INFO'

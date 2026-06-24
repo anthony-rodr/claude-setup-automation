@@ -298,6 +298,21 @@ Compress-Archive -Path $include -DestinationPath $ZipPath -CompressionLevel Opti
 
 $zipSize = (Get-Item $ZipPath).Length / 1MB
 Write-Step ("Package ready: {0}  ({1:F1} MB)" -f $ZipPath, $zipSize) 'Green'
+
+# Compute SHA256 of the zip and update VERSIONS.md so Deploy can verify integrity before extracting.
+# The project root VERSIONS.md (uploaded separately to S3) gets the hash; the copy inside the zip
+# doesn't need it — Deploy reads VERSIONS.md from S3 before downloading the zip.
+$zipHash = (Get-FileHash -Path $ZipPath -Algorithm SHA256).Hash.ToLower()
+Write-Step "Zip SHA256: $zipHash" 'Green'
+$versionsRoot = Join-Path $ProjectRoot 'VERSIONS.md'
+$vContent = [System.IO.File]::ReadAllText($versionsRoot)
+if ($vContent -match 'ZipSHA256:') {
+    $vContent = $vContent -replace 'ZipSHA256: [a-fA-F0-9]+', "ZipSHA256: $zipHash"
+} else {
+    $vContent = $vContent -replace '(Commit: [^\r\n]+)', "`$1`nZipSHA256: $zipHash"
+}
+[System.IO.File]::WriteAllText($versionsRoot, $vContent, [System.Text.Encoding]::UTF8)
+Write-Step "VERSIONS.md updated with ZipSHA256." 'Green'
 Write-Step ''
 Write-Step 'Bundled versions:' 'White'
 $manifest | ForEach-Object { Write-Step "  $($_.Package.PadRight(18)) $($_.Version)" 'White' }
@@ -326,12 +341,87 @@ try {
                 Write-Step "  WARNING: `$ScriptVersion line not found in $scriptName - not stamped." 'Yellow'
             }
         }
+        # Compute SHA256 of the stamped Deploy script and write to VERSIONS.md so
+        # Bootstrap can verify integrity before executing it.
+        $deployScript = Join-Path $PSScriptRoot 'Deploy-DevEnvironment.ps1'
+        $deployHash   = (Get-FileHash -Path $deployScript -Algorithm SHA256).Hash.ToLower()
+        Write-Step "Deploy SHA256: $deployHash" 'Green'
+        $versionsRoot = Join-Path $ProjectRoot 'VERSIONS.md'
+        $vContent = [System.IO.File]::ReadAllText($versionsRoot)
+        if ($vContent -match 'DeploySHA256:') {
+            $vContent = $vContent -replace 'DeploySHA256: [a-fA-F0-9]+', "DeploySHA256: $deployHash"
+        } else {
+            $vContent = $vContent -replace '(ZipSHA256: [a-fA-F0-9]+)', "`$1`nDeploySHA256: $deployHash"
+        }
+        [System.IO.File]::WriteAllText($versionsRoot, $vContent, [System.Text.Encoding]::UTF8)
+        Write-Step "VERSIONS.md updated with DeploySHA256." 'Green'
+
+        # Upload all three files to S3 automatically
         Write-Step ''
-        Write-Step 'NEXT STEPS:' 'Yellow'
-        Write-Step "  1. Copy the stamped scripts into NinjaOne (both show commit $hash)." 'Yellow'
-        Write-Step '  2. Restore the placeholder in the repo so git stays clean:' 'Yellow'
-        Write-Step '       git checkout -- scripts/Deploy-DevEnvironment.ps1 scripts/Rollback-DevEnvironment.ps1' 'Yellow'
+        Write-Step 'Uploading to S3...' 'Cyan'
+        $s3Bucket = 'claude-deploy-scripts'
+        $s3Prefix = 'Windows'
+        $uploads  = @{
+            "$s3Prefix/Deploy-DevEnvironment.ps1"   = $deployScript
+            "$s3Prefix/VERSIONS.md"                 = $versionsRoot
+            "$s3Prefix/claude-setup-automation.zip" = $ZipPath
+        }
+        $uploadFailed = $false
+        foreach ($key in $uploads.Keys) {
+            $local = $uploads[$key]
+            aws s3 cp $local "s3://$s3Bucket/$key" --no-progress 2>&1 | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+                Write-Step "  WARNING: Failed to upload $key — run manually: aws s3 cp `"$local`" s3://$s3Bucket/$key" 'Yellow'
+                $uploadFailed = $true
+            } else {
+                Write-Step "  OK: $key" 'Green'
+            }
+        }
+        if (-not $uploadFailed) {
+            Write-Step 'All files uploaded to S3.' 'Green'
+
+            # Generate fresh 7-day pre-signed URLs for all three files.
+            Write-Step ''
+            Write-Step 'Generating pre-signed URLs (7-day expiry)...' 'Cyan'
+            $expirySecs = 604800
+            $presignKeys = @(
+                @{ Label = 'deployurl';   Key = "$s3Prefix/Deploy-DevEnvironment.ps1"   }
+                @{ Label = 'versionsurl'; Key = "$s3Prefix/VERSIONS.md"                 }
+                @{ Label = 'packageurl';  Key = "$s3Prefix/claude-setup-automation.zip" }
+            )
+            $presignOk = $true
+            $presignResults = @{}
+            foreach ($entry in $presignKeys) {
+                $url = (aws s3 presign "s3://$s3Bucket/$($entry.Key)" --expires-in $expirySecs 2>&1).Trim()
+                if ($LASTEXITCODE -ne 0 -or -not $url -or $url -like 'An error*') {
+                    Write-Step "  WARNING: presign failed for $($entry.Key): $url" 'Yellow'
+                    $presignOk = $false
+                } else {
+                    $presignResults[$entry.Label] = $url
+                }
+            }
+
+            if ($presignOk) {
+                $expiryDate = (Get-Date).AddDays(7).ToString('yyyy-MM-dd')
+                Write-Step ''
+                Write-Step '============================================================' 'Cyan'
+                Write-Step ' PASTE THESE INTO NINJAONE BOOTSTRAP SCRIPT VARIABLES' 'Cyan'
+                Write-Step " URLs expire: $expiryDate" 'Cyan'
+                Write-Step '============================================================' 'Cyan'
+                Write-Step ''
+                foreach ($label in @('deployurl', 'versionsurl', 'packageurl')) {
+                    Write-Step "$label" 'White'
+                    Write-Step $presignResults[$label] 'Yellow'
+                    Write-Step ''
+                }
+                Write-Step '============================================================' 'Cyan'
+            }
+        }
+
+        Write-Step ''
+        Write-Step 'Restore the placeholder in the repo so git stays clean:' 'Yellow'
+        Write-Step '  git checkout -- scripts/Deploy-DevEnvironment.ps1 scripts/Rollback-DevEnvironment.ps1' 'Yellow'
     }
 } catch {
-    Write-Step "  WARNING: Stamp step failed: $_" 'Yellow'
+    Write-Step "  WARNING: Stamp/hash/upload step failed: $_" 'Yellow'
 }

@@ -16,19 +16,24 @@
     Runs as: SYSTEM (NinjaOne context)
     Tested:  Windows 11
 #>
-param([string]$GithubPat = '')
+param(
+    [string]$GithubPat   = '',
+    [string]$PackageUrl  = '',
+    [string]$VersionsUrl = ''
+)
 
-$ScriptVersion = 'GIT_COMMIT_HASH'  # Stamped by Package-Release.ps1 — copy stamped script to NinjaOne
+$ScriptVersion = 'abffb60'  # Stamped by Package-Release.ps1 — copy stamped script to NinjaOne
 
 # ── Configuration ─────────────────────────────────────────────────────────────
-# Stable URLs — update these when moving between environments (sandbox → production).
-$PackageUrl = 'https://claude-deploy-scripts.s3.us-east-2.amazonaws.com/Windows/claude-setup-automation.zip'
+# PackageUrl and VersionsUrl are passed as parameters from the NinjaOne Bootstrap
+# (pre-signed S3 URLs stored as NinjaOne script parameters — not in code).
+if (-not $PackageUrl)  { throw '-PackageUrl is required. Set it in the NinjaOne script parameters.' }
+if (-not $VersionsUrl) { throw '-VersionsUrl is required. Set it in the NinjaOne script parameters.' }
 
 # Where to stage the downloaded zip and extracted contents
-$StageDir        = 'C:\ProgramData\MasterElectronics\Deploy'
+$StageDir        = 'C:\ProgramData\AIE\Deploy'
 $ZipPath         = Join-Path $StageDir 'setup.zip'
 $ExtractDir      = Join-Path $StageDir 'package'
-$VersionsUrl     = 'https://claude-deploy-scripts.s3.us-east-2.amazonaws.com/Windows/VERSIONS.md'
 $VersionsOnDisk  = Join-Path $StageDir 'VERSIONS.md'
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -51,31 +56,16 @@ try {
     New-Item -ItemType Directory -Path $StageDir -Force | Out-Null
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13
 
-    # ── Startup banner + staleness check ──────────────────────────────────────
+    # ── Startup banner ────────────────────────────────────────────────────────
     Write-Host ('=' * 64)
-    Write-Host '  Master Electronics — Developer Environment DEPLOY'
+    Write-Host '  AIE — Developer Environment DEPLOY'
     Write-Host ('=' * 64)
-    Write-Host "  Script version: $ScriptVersion" -NoNewline
-    try {
-        $verResp = Invoke-RestMethod `
-            -Uri 'https://api.github.com/repos/anthony-rodr/claude-setup-automation/commits/main' `
-            -Headers $AuthHeaders -ErrorAction Stop
-        $latestSha = $verResp.sha.Substring(0, 7)
-        if ($ScriptVersion -eq 'GIT_COMMIT_HASH') {
-            # Pulled live from GitHub — always current, no stamp needed
-            Write-Host "  [live — main @ $latestSha]" -ForegroundColor Green
-        } elseif ($latestSha -eq $ScriptVersion) {
-            Write-Host "  [$ScriptVersion — current]" -ForegroundColor Green
-        } else {
-            Write-Host "  [$ScriptVersion — OUTDATED, repo is $latestSha]" -ForegroundColor Red
-            if ([System.Environment]::UserInteractive) {
-                $ans = Read-Host "  This script is outdated. Were you intending to run this version? Type YES to continue"
-                if ($ans -ne 'YES') { Write-Host 'Deployment cancelled.' -ForegroundColor Cyan; exit 0 }
-            }
-        }
-    } catch {
-        Write-Host '  [version check unavailable]' -ForegroundColor Yellow
+    if ($ScriptVersion -eq 'GIT_COMMIT_HASH') {
+        Write-Host "  Script version: [not stamped — run Package-Release.ps1]" -ForegroundColor Yellow
+    } else {
+        Write-Host "  Script version: $ScriptVersion" -ForegroundColor Green
     }
+    Write-Host "  Computer: $env:COMPUTERNAME"
     Write-Host ('=' * 64)
     # ─────────────────────────────────────────────────────────────────────────
 
@@ -90,32 +80,39 @@ try {
     }
     # ─────────────────────────────────────────────────────────────────────────
 
-    # 1. Check if the bundle is already current by fetching VERSIONS.md (~2 KB)
-    #    and comparing against the last deployed version on disk.
-    $skipDownload = $false
-    if (Test-Path $ExtractDir) {
-        try {
-            $resp = Invoke-WebRequest -Uri $VersionsUrl -Headers $AuthHeaders -UseBasicParsing -ErrorAction Stop
-            # Content may be [byte[]] on older PS5 builds — decode explicitly
-            $remoteVersions = if ($resp.Content -is [byte[]]) {
-                [System.Text.Encoding]::UTF8.GetString($resp.Content)
-            } else {
-                [string]$resp.Content
-            }
-            if (Test-Path $VersionsOnDisk) {
-                $localVersions = Get-Content $VersionsOnDisk -Raw
-                $installPresent = Get-ChildItem -Path $ExtractDir -Filter 'Install-DevEnvironment.ps1' -Recurse -ErrorAction SilentlyContinue |
-                                  Select-Object -First 1
-                if ($installPresent -and $remoteVersions.Trim() -eq $localVersions.Trim()) {
-                    Write-Step "Bundle is current (VERSIONS.md matches) — skipping download."
-                    $skipDownload = $true
-                } else {
-                    Write-Step "New version detected or extracted package incomplete — re-downloading bundle."
-                }
-            }
-        } catch {
-            Write-Step "Version check failed ($_) — proceeding with full download."
+    # 1. Fetch VERSIONS.md to check staleness and get zip SHA256 for integrity check.
+    #    Always fetched (even on first run) so SHA256 is available before downloading.
+    $skipDownload    = $false
+    $expectedZipHash = $null
+    try {
+        $resp = Invoke-WebRequest -Uri $VersionsUrl -Headers $AuthHeaders -UseBasicParsing -ErrorAction Stop
+        # Content may be [byte[]] on older PS5 builds — decode explicitly
+        $remoteVersions = if ($resp.Content -is [byte[]]) {
+            [System.Text.Encoding]::UTF8.GetString($resp.Content)
+        } else {
+            [string]$resp.Content
         }
+
+        # Parse zip SHA256 for post-download integrity check
+        if ($remoteVersions -match '(?m)^ZipSHA256:\s*([a-fA-F0-9]{64})') {
+            $expectedZipHash = $Matches[1].ToLower()
+            Write-Step "Zip SHA256 from VERSIONS.md: $($expectedZipHash.Substring(0,8))..."
+        }
+
+        # Check if current bundle is already up-to-date
+        if ((Test-Path $ExtractDir) -and (Test-Path $VersionsOnDisk)) {
+            $localVersions = Get-Content $VersionsOnDisk -Raw
+            $installPresent = Get-ChildItem -Path $ExtractDir -Filter 'Install-DevEnvironment.ps1' -Recurse -ErrorAction SilentlyContinue |
+                              Select-Object -First 1
+            if ($installPresent -and $remoteVersions.Trim() -eq $localVersions.Trim()) {
+                Write-Step "Bundle is current (VERSIONS.md matches) — skipping download."
+                $skipDownload = $true
+            } else {
+                Write-Step "New version detected or extracted package incomplete — re-downloading bundle."
+            }
+        }
+    } catch {
+        Write-Step "Version check failed ($_) — proceeding with full download."
     }
 
     if (-not $skipDownload) {
@@ -123,11 +120,24 @@ try {
         if (Test-Path $ExtractDir) { Remove-Item $ExtractDir -Recurse -Force }
         New-Item -ItemType Directory -Path $ExtractDir -Force | Out-Null
 
-        Write-Step "Downloading package from: $PackageUrl"
+        Write-Step "Downloading package..."
         Invoke-WebRequest -Uri $PackageUrl -Headers $AuthHeaders -OutFile $ZipPath -UseBasicParsing -ErrorAction Stop
-        Write-Step "Download complete: $ZipPath"
+        Write-Step "Download complete."
 
-        # 3. Extract
+        # 3. Verify zip integrity before extracting
+        if ($expectedZipHash) {
+            Write-Step "Verifying zip integrity..."
+            $actualHash = (Get-FileHash -Path $ZipPath -Algorithm SHA256).Hash.ToLower()
+            if ($actualHash -ne $expectedZipHash) {
+                Remove-Item $ZipPath -Force -ErrorAction SilentlyContinue
+                throw "ZIP integrity check FAILED — expected $expectedZipHash, got $actualHash — aborting to prevent tampered package execution."
+            }
+            Write-Step "ZIP integrity verified."
+        } else {
+            Write-Step "WARNING: No SHA256 found in VERSIONS.md — skipping integrity check."
+        }
+
+        # 4. Extract
         Write-Step "Extracting package…"
         Expand-Archive -Path $ZipPath -DestinationPath $ExtractDir -Force
         Write-Step "Extraction complete."

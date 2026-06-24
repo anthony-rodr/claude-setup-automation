@@ -10,7 +10,7 @@ function Write-Status {
 
 Write-Host ''
 Write-Host '========================================='
-Write-Host '  Master Electronics — Claude Code Repair'
+Write-Host '  AIE — Claude Code Repair'
 Write-Host '========================================='
 Write-Host "  Computer : $env:COMPUTERNAME"
 Write-Host "  Run as   : $([System.Security.Principal.WindowsIdentity]::GetCurrent().Name)"

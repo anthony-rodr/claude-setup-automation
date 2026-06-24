@@ -16,7 +16,7 @@
     Path to the target user profile directory.  Defaults to the current user's profile.
 
 .PARAMETER SetupDir
-    The Master Electronics setup directory where vscode-extensions.json is stored.
+    The setup directory where vscode-extensions.json is stored.
 
 .PARAMETER SkipVsCodeExtensions
     When present, skip installing VS Code extensions (used when running as SYSTEM).
@@ -24,7 +24,7 @@
 [CmdletBinding()]
 param(
     [string]$UserProfile = $env:USERPROFILE,
-    [string]$SetupDir    = 'C:\ProgramData\MasterElectronics\DevSetup',
+    [string]$SetupDir    = 'C:\ProgramData\AIE\DevSetup',
     [switch]$SkipVsCodeExtensions
 )
 
@@ -35,9 +35,9 @@ $extMarker  = Join-Path $UserProfile '.claude\.devsetup-vscode-extensions-config
 # -----------------------------------------------------------------------------
 # Logging (appends to shared log so IT can read one file)
 # Log lives in the PARENT of SetupDir so it survives rollback (rollback deletes
-# DevSetup but not the MasterElectronics parent directory).
+# DevSetup but not the AIE parent directory).
 # -----------------------------------------------------------------------------
-$LogParent = Split-Path $SetupDir -Parent   # C:\ProgramData\MasterElectronics
+$LogParent = Split-Path $SetupDir -Parent   # C:\ProgramData\AIE
 if (-not (Test-Path $LogParent)) { New-Item -ItemType Directory -Path $LogParent -Force | Out-Null }
 $LogPath = Join-Path $LogParent 'configure.log'
 
@@ -165,7 +165,7 @@ function Set-UserPath {
         # (user is currently logged on), fall back to their already-loaded SID hive.
         $hivePath   = Join-Path $UserProfile 'NTUSER.DAT'
         $uname      = Split-Path $UserProfile -Leaf
-        $hiveKey    = "HKU\METemp_$uname"
+        $hiveKey    = "HKU\AIETemp_$uname"
         $hiveLoaded = $false
 
         if (-not (Test-Path $hivePath)) {
@@ -178,7 +178,7 @@ function Set-UserPath {
         & "$env:SystemRoot\System32\reg.exe" load $hiveKey $hivePath 2>&1 | Out-Null
         if ($LASTEXITCODE -eq 0) {
             $hiveLoaded = $true
-            $regPath    = "Registry::HKEY_USERS\METemp_$uname\Environment"
+            $regPath    = "Registry::HKEY_USERS\AIETemp_$uname\Environment"
         } else {
             # NTUSER.DAT is locked - user is currently logged on.
             # Find their already-loaded SID hive under HKU.
