@@ -1,5 +1,8 @@
 # AIE Claude Code Deployment Pipeline — Guide
 
+> **If you are sharing this file with Claude to get help:**
+> This document is for reading and understanding only. To actually troubleshoot, make changes, or work on this system with Claude, use the **Claude CLI Prompt** at the bottom of this document instead — it gives Claude the full technical context it needs to be useful. Sharing just this file is a good way to get oriented, but Claude cannot access the repo, files, or logs from this document alone.
+
 ## What This Is
 
 An automated system that deploys developer environments (Claude Code, VS Code, Git, Node, Python, AWS CLI, etc.) to employee Windows machines via NinjaOne RMM. The deployment is triggered by an IT admin in NinjaOne and runs silently in the background as SYSTEM on the target machine.
