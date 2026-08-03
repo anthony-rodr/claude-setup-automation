@@ -5,8 +5,15 @@
 
 .DESCRIPTION
     For each installed tool, checks the currently installed version against the
-    latest version available from the upstream source.  Only tools that are
-    out-of-date are updated; already-current tools are skipped entirely.
+    latest version available from the upstream source.
+
+    Per CAB decision (auto-updating language runtimes/IaC tools was rejected —
+    project code can be version-pinned against them, and a silent bump could
+    break someone's actual work): only VS Code and Claude Code auto-update when
+    out of date. Every other tool (Git, PowerShell 7, Python, GitHub CLI, AWS
+    CLI, Terraform, Node.js, Claude Desktop, Docker Desktop) is CHECK-ONLY —
+    version drift is checked and reported, but never auto-remediated. Marked via
+    the CheckOnly flag on each tool entry.
 
     Designed to be pulled from GitHub and run by NinjaOne-Patch.ps1 on a
     recurring schedule (weekly / monthly).  Runs as SYSTEM via NinjaOne.
@@ -92,6 +99,7 @@ $Tools = @(
 
     @{
         Name         = 'Git for Windows'
+        CheckOnly    = $true  # CAB: report drift only, no auto-update
         GetInstalled = { try { (& git --version 2>&1) -replace 'git version ','' } catch { $null } }
         GetLatest    = {
             (Get-GitHubLatest 'git-for-windows/git' '-64-bit\.exe$').Version
@@ -125,6 +133,7 @@ $Tools = @(
 
     @{
         Name         = 'PowerShell 7'
+        CheckOnly    = $true  # CAB: report drift only, no auto-update
         GetInstalled = { try { (& pwsh --version 2>&1) -replace 'PowerShell ','' } catch { $null } }
         GetLatest    = { (Get-GitHubLatest 'PowerShell/PowerShell' 'win-x64\.msi$' '-preview|-rc').Version }
         Update       = {
@@ -139,21 +148,45 @@ $Tools = @(
 
     @{
         Name         = 'Python 3.12'
+        CheckOnly    = $true  # CAB: language runtime - code can be version-pinned against it
         GetInstalled = {
             try { (& python --version 2>&1) -replace 'Python ','' }
             catch { $null }
         }
         GetLatest    = {
+            # python/cpython publishes ZERO GitHub Releases - /releases always returns
+            # an empty array, so this always found $null for "latest" (confirmed
+            # 2026-08-01, same bug class as AWS CLI). Also: not every 3.12.x tag has a
+            # Windows installer - python.org stops building Windows/macOS binaries once
+            # a branch enters security-only maintenance (3.12.11+ are source-only;
+            # 3.12.10 is the actual latest with an amd64.exe). Walk down from the
+            # highest tag to find the first one with a real installer, so this stays
+            # correct without hardcoding a version that will eventually go stale.
             $ProgressPreference = 'SilentlyContinue'
-            $rels = Invoke-RestMethod 'https://api.github.com/repos/python/cpython/releases?per_page=100'
-            ($rels | Where-Object { $_.tag_name -match '^v3\.12\.' -and -not $_.prerelease } | Select-Object -First 1).tag_name
+            $tags = Invoke-RestMethod 'https://api.github.com/repos/python/cpython/tags?per_page=100'
+            $candidates = $tags | Where-Object { $_.name -match '^v3\.12\.\d+$' } |
+                ForEach-Object { [version]($_.name -replace '^v', '') } | Sort-Object -Descending
+            $found = $null
+            foreach ($candidate in $candidates) {
+                $testUrl = "https://www.python.org/ftp/python/$candidate/python-$candidate-amd64.exe"
+                try { Invoke-WebRequest -Uri $testUrl -Method Head -UseBasicParsing -ErrorAction Stop | Out-Null; $found = $candidate; break }
+                catch { continue }
+            }
+            "v$found"
         }
         Update       = {
+            # Same walk-down logic as GetLatest above - see that comment for why.
             $ProgressPreference = 'SilentlyContinue'
-            $rels  = Invoke-RestMethod 'https://api.github.com/repos/python/cpython/releases?per_page=100'
-            $rel   = $rels | Where-Object { $_.tag_name -match '^v3\.12\.' -and -not $_.prerelease } | Select-Object -First 1
-            $asset = $rel.assets | Where-Object { $_.name -match 'amd64\.exe$' } | Select-Object -First 1
-            $url   = if ($asset) { $asset.browser_download_url } else { 'https://www.python.org/ftp/python/3.12.10/python-3.12.10-amd64.exe' }
+            $tags = Invoke-RestMethod 'https://api.github.com/repos/python/cpython/tags?per_page=100'
+            $candidates = $tags | Where-Object { $_.name -match '^v3\.12\.\d+$' } |
+                ForEach-Object { [version]($_.name -replace '^v', '') } | Sort-Object -Descending
+            $ver = $null
+            foreach ($candidate in $candidates) {
+                $testUrl = "https://www.python.org/ftp/python/$candidate/python-$candidate-amd64.exe"
+                try { Invoke-WebRequest -Uri $testUrl -Method Head -UseBasicParsing -ErrorAction Stop | Out-Null; $ver = $candidate.ToString(); $url = $testUrl; break }
+                catch { continue }
+            }
+            if (-not $ver) { throw "Could not find a Python 3.12.x release with a Windows amd64 installer" }
             $tmp   = Join-Path $TempDir 'python-setup.exe'
             Invoke-Download $url $tmp
             Invoke-Installer $tmp @('/quiet', 'InstallAllUsers=1', 'PrependPath=1', 'Include_test=0')
@@ -163,6 +196,7 @@ $Tools = @(
 
     @{
         Name         = 'GitHub CLI'
+        CheckOnly    = $true  # CAB: report drift only, no auto-update
         GetInstalled = {
             try {
                 $v = & gh --version 2>&1 | Select-Object -First 1
@@ -181,6 +215,7 @@ $Tools = @(
 
     @{
         Name         = 'AWS CLI v2'
+        CheckOnly    = $true  # CAB: report drift only, no auto-update
         GetInstalled = {
             try {
                 $v = & aws --version 2>&1
@@ -188,9 +223,15 @@ $Tools = @(
             } catch { $null }
         }
         GetLatest    = {
+            # aws/aws-cli does NOT publish current v2.x versions as GitHub "Releases" -
+            # /releases only has a stray 2018 prerelease object, so this always returned
+            # $null and every AWS CLI drift check silently no-op'd (confirmed 2026-08-01
+            # via the Company Portal updater always showing "update available"). Current
+            # versions only exist as plain git tags - use /tags instead.
             $ProgressPreference = 'SilentlyContinue'
-            $rels = Invoke-RestMethod 'https://api.github.com/repos/aws/aws-cli/releases?per_page=30'
-            ($rels | Where-Object { $_.tag_name -match '^2\.' -and -not $_.prerelease } | Select-Object -First 1).tag_name
+            $tags = Invoke-RestMethod 'https://api.github.com/repos/aws/aws-cli/tags?per_page=30'
+            ($tags | Where-Object { $_.name -match '^2\.\d+\.\d+$' } |
+                ForEach-Object { [version]$_.name } | Sort-Object -Descending | Select-Object -First 1).ToString()
         }
         Update       = {
             $tmp = Join-Path $TempDir 'AWSCLIV2.msi'
@@ -202,6 +243,7 @@ $Tools = @(
 
     @{
         Name         = 'Terraform'
+        CheckOnly    = $true  # CAB: IaC tool - configs can pin required_version/providers
         GetInstalled = {
             try {
                 $v = & terraform --version 2>&1 | Select-Object -First 1
@@ -230,6 +272,7 @@ $Tools = @(
 
     @{
         Name         = 'Node.js'
+        CheckOnly    = $true  # CAB: language runtime - code can be version-pinned against it
         GetInstalled = { try { (& node --version 2>&1).Trim() } catch { $null } }
         GetLatest    = {
             $ProgressPreference = 'SilentlyContinue'
@@ -254,28 +297,72 @@ $Tools = @(
     }
 
     @{
+        # Claude Code has been a native binary at C:\ProgramData\Claude\bin\claude.exe
+        # since the npm install tier was removed 2026-06-03 (see Install-DevEnvironment.ps1
+        # Install-ClaudeCode). This entry previously checked for an npm-installed package,
+        # which no longer exists on any current machine — GetInstalled always returned
+        # $null, so the main patch loop silently logged "Not installed - skipping" and
+        # Claude Code was NEVER actually updated fleet-wide. Fixed to check/update the
+        # real native binary, mirroring Install-ClaudeCode's CDN + SHA256 verification
+        # exactly. Deliberately does NOT use npm or `claude --update` — the latter creates
+        # an orphaned per-user duplicate under C:\Users\<profile>\.local\bin instead of
+        # updating the canonical machine-wide binary when run outside a normal interactive
+        # user session (confirmed root cause of a July 2026 support incident).
         Name         = 'Claude Code'
         GetInstalled = {
-            $pkgJson = Join-Path $NpmPrefix 'node_modules\@anthropic-ai\claude-code\package.json'
-            try { (Get-Content $pkgJson -Raw | ConvertFrom-Json).version } catch { $null }
+            $claudeExe = 'C:\ProgramData\Claude\bin\claude.exe'
+            try {
+                $v = & $claudeExe --version 2>&1 | Select-Object -First 1
+                if ($v -match '^(\S+)') { $Matches[1] } else { $null }
+            } catch { $null }
         }
         GetLatest    = {
             $ProgressPreference = 'SilentlyContinue'
-            (Invoke-RestMethod 'https://registry.npmjs.org/@anthropic-ai/claude-code/latest').version
-        }
-        SkipIf       = {
-            $npmCmd = Join-Path $NvmSymlink 'npm.cmd'
-            if (-not (Test-Path $npmCmd)) { 'npm not available - Claude Code update skipped' }
+            (Invoke-RestMethod 'https://downloads.claude.ai/claude-code-releases/latest' -UseBasicParsing -ErrorAction Stop).Trim()
         }
         Update       = {
-            $npmCmd = Join-Path $NvmSymlink 'npm.cmd'
-            $env:npm_config_prefix = $NpmPrefix
-            & $npmCmd install -g '@anthropic-ai/claude-code' 2>&1 | Out-Null
+            $ClaudeDir    = 'C:\ProgramData\Claude\bin'
+            $ClaudeExe    = Join-Path $ClaudeDir 'claude.exe'
+            $DownloadBase = 'https://downloads.claude.ai/claude-code-releases'
+            $arch = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'win32-arm64' } else { 'win32-x64' }
+
+            $version = (Invoke-RestMethod -Uri "$DownloadBase/latest" -UseBasicParsing -ErrorAction Stop).Trim()
+            $cdnManifest = Invoke-RestMethod -Uri "$DownloadBase/$version/manifest.json" -UseBasicParsing -ErrorAction Stop
+            $expected = $cdnManifest.platforms.$arch.checksum
+            if (-not $expected) { throw "Platform $arch not found in Claude Code CDN manifest" }
+
+            $tmpExe = Join-Path $TempDir "claude-$version-$arch.exe"
+            Invoke-Download "$DownloadBase/$version/$arch/claude.exe" $tmpExe
+
+            $actual = (Get-FileHash -Path $tmpExe -Algorithm SHA256).Hash.ToLower()
+            if ($actual -ne $expected) {
+                Remove-Item $tmpExe -Force -ErrorAction SilentlyContinue
+                throw "Checksum mismatch - expected $expected, got $actual"
+            }
+
+            # Direct file replacement onto the canonical machine-wide path - not via
+            # npm, not via `claude --update`. See comment above for why.
+            if (-not (Test-Path $ClaudeDir)) { New-Item -ItemType Directory -Path $ClaudeDir -Force | Out-Null }
+            Move-Item $tmpExe $ClaudeExe -Force
+
+            # Move-Item on the same volume (both $TempDir and $ClaudeDir are under C:)
+            # is a cheap rename - the file keeps ITS ORIGINAL ACL from $TempDir instead
+            # of inheriting $ClaudeDir's permissions. Left unfixed, only the identity
+            # that ran this patch script (SYSTEM) could execute the new binary - every
+            # other user on the machine would get "Access is denied" (confirmed root
+            # cause of a July 2026 support incident). Reset forces it back to inherit
+            # from the parent folder, restoring normal execute access for everyone.
+            icacls $ClaudeExe /reset | Out-Null
         }
     }
 
     @{
+        # CheckOnly here is largely moot in practice - Claude Desktop already has its
+        # own silent background auto-updater (enforced via the enterprise policy set
+        # in claude-desktop-intune, autoUpdaterEnforcementHours = 72), so this patch
+        # script updating it too would just be redundant. Left check-only per CAB.
         Name         = 'Claude Desktop'
+        CheckOnly    = $true
         GetInstalled = {
             try {
                 $pkg = Get-AppxPackage -AllUsers *Claude* -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -295,6 +382,7 @@ $Tools = @(
 
     @{
         Name         = 'Docker Desktop'
+        CheckOnly    = $true  # CAB: report drift only, no auto-update
         GetInstalled = {
             try {
                 $v = & docker --version 2>&1
@@ -348,8 +436,20 @@ foreach ($tool in $Tools) {
         continue
     }
 
+    $isCheckOnly  = $tool.ContainsKey('CheckOnly') -and $tool.CheckOnly
+    $alwaysUpdate = $tool.ContainsKey('AlwaysUpdate') -and $tool.AlwaysUpdate
+
+    # Tools with no reliable version API (AlwaysUpdate) and CheckOnly can't be
+    # compared or safely reported on beyond "here's what's installed" - there's
+    # nothing to diff against, and CAB said not to touch it automatically anyway.
+    if ($alwaysUpdate -and $isCheckOnly) {
+        Write-Log "  Installed: $installed (no public version API - check-only, no action taken)." 'INFO'
+        $results.Add([pscustomobject]@{ Name=$name; Status='installed (unknown)'; Detail=$installed })
+        continue
+    }
+
     # For always-update tools (no reliable version API), update unconditionally
-    if ($tool.ContainsKey('AlwaysUpdate') -and $tool.AlwaysUpdate) {
+    if ($alwaysUpdate) {
         Write-Log "  Installed: $installed - updating (no version API, always refresh)." 'INFO'
     } else {
         # Compare installed vs latest
@@ -359,6 +459,7 @@ foreach ($tool in $Tools) {
         } catch {
             Write-Log "  Version check failed: $_ - skipping." 'WARN'
             $results.Add([pscustomobject]@{ Name=$name; Status='check failed'; Detail="$_" })
+            continue
         }
         if ($null -eq $latest) {
             Write-Log "  Could not determine latest version - skipping." 'WARN'
@@ -372,10 +473,18 @@ foreach ($tool in $Tools) {
             continue
         }
 
+        # CAB-approved: report drift for this tool, don't remediate it ourselves.
+        if ($isCheckOnly) {
+            Write-Log "  Update available: $installed -> $latest (check-only - no action taken)" 'WARN'
+            $results.Add([pscustomobject]@{ Name=$name; Status='update available'; Detail="$installed -> $latest" })
+            continue
+        }
+
         Write-Log "  Update available: $installed -> $latest" 'INFO'
     }
 
-    # Perform update
+    # Perform update - only reached for tools NOT marked CheckOnly (currently:
+    # VS Code and Claude Code, per CAB approval).
     try {
         & $tool.Update
         $newVer = try { & $tool.GetInstalled } catch { '?' }
