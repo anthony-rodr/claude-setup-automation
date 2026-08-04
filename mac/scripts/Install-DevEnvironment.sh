@@ -70,11 +70,41 @@ manifest_record() {
 }
 
 # ── Helper: run command with timeout ──────────────────────────────────────────
+# macOS's BSD userland does not ship GNU coreutils' `timeout` (Linux/Homebrew-coreutils
+# only) - a bare `timeout ...` call here fails with "command not found" (exit 127) on a
+# stock Mac (confirmed via a real deploy failure 2026-08-04). Portable replacement:
+# background the command, race a watcher that kills it after the timeout, and
+# translate "we killed it" to exit 124 so every existing caller's `-eq 124` check
+# (this function's own callers, e.g. install_pkg) keeps working unchanged.
 invoke_with_timeout() {
     local timeout_secs="$1"; shift
-    timeout "$timeout_secs" "$@"
+    local sentinel
+    sentinel=$(mktemp)
+    rm -f "$sentinel"
+
+    "$@" &
+    local child_pid=$!
+
+    (
+        sleep "$timeout_secs"
+        if kill -0 "$child_pid" 2>/dev/null; then
+            touch "$sentinel"
+            kill -TERM "$child_pid" 2>/dev/null
+        fi
+    ) &
+    local watcher_pid=$!
+
+    wait "$child_pid" 2>/dev/null
     local exit_code=$?
-    [ $exit_code -eq 124 ] && { log_warn "Command timed out after ${timeout_secs}s: $*"; return 124; }
+
+    kill "$watcher_pid" 2>/dev/null
+    wait "$watcher_pid" 2>/dev/null
+
+    if [ -f "$sentinel" ]; then
+        rm -f "$sentinel"
+        log_warn "Command timed out after ${timeout_secs}s: $*"
+        return 124
+    fi
     return $exit_code
 }
 

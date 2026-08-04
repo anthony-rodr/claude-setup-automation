@@ -1,14 +1,24 @@
 #!/bin/bash
-# Tier 1 — NinjaOne Bootstrap (stored in NinjaOne, NOT in the repo zip)
-# Runs as root via NinjaOne agent. Downloads Deploy-DevEnvironment.sh fresh
-# from GitHub on every run, then hands off to it.
+# AIE Dev Environment — NinjaOne Bootstrap (macOS)
+# Stored inline in NinjaOne, NOT in the repo zip.
+# Calls Lambda for pre-signed S3 URLs — lambdakey Script Variable must be configured in NinjaOne.
 #
 # To update bootstrap logic: edit this file and re-paste into NinjaOne.
-# To update the installer: push to GitHub — Deploy pulls latest automatically.
+# To push a new installer: run the PSU Build-And-Upload-Mac job — no NinjaOne update needed.
 
 set -uo pipefail
 
-ROOT="/Library/MasterElectronics"
+# Lambda URL is permanent — never needs updating in NinjaOne.
+LAMBDA_URL='https://dqjiychkx3ockgvn24rscxkmaq0wwfat.lambda-url.us-east-2.on.aws/'
+
+# NinjaOne passes Script Variables as environment variables.
+API_KEY="${lambdakey:-}"
+if [ -z "$API_KEY" ]; then
+    echo "[ERROR] lambdakey script variable is not configured in NinjaOne." >&2
+    exit 1
+fi
+
+ROOT="/Library/AIE"
 LOG_DIR="$ROOT/Logs"
 mkdir -p "$LOG_DIR"
 
@@ -18,18 +28,37 @@ DEPLOY_SCRIPT="$LOG_DIR/Deploy-DevEnvironment.sh"
 DEPLOY_OUT="$LOG_DIR/deploy-output-$STAMP.log"
 DEPLOY_ERR="$LOG_DIR/deploy-error-$STAMP.log"
 
-LOCKFILE="/var/run/me-devsetup.lock"
+LOCKFILE="/var/run/aie-devsetup.lock"
 
 ninja_log() {
     local line="[$(date '+%Y-%m-%d %H:%M:%S')] $*"
     echo "$line" | tee -a "$NINJA_LOG"
 }
 
+get_lambda_url() {
+    local file="$1"
+    local response
+    response=$(curl -fsSL \
+        -H "x-api-key: ${API_KEY}" \
+        -H 'User-Agent: aie-dev-setup' \
+        "${LAMBDA_URL}?file=${file}" 2>&1) || {
+        echo "[ERROR] Lambda call failed for file=$file" >&2
+        return 1
+    }
+    local url
+    url=$(echo "$response" | python3 -c "import sys,json; print(json.load(sys.stdin)['url'])" 2>/dev/null || true)
+    if [ -z "$url" ]; then
+        echo "[ERROR] Lambda returned no URL for file=$file (response: $response)" >&2
+        return 1
+    fi
+    echo "$url"
+}
+
 # ── Mutex via lock file ────────────────────────────────────────────────────────
 if [ -f "$LOCKFILE" ]; then
     LOCK_PID=$(cat "$LOCKFILE" 2>/dev/null || echo "")
     if [ -n "$LOCK_PID" ] && kill -0 "$LOCK_PID" 2>/dev/null; then
-        ninja_log "Another Master Electronics Dev Environment install is already running (PID $LOCK_PID). Exiting."
+        ninja_log "Another AIE Dev Environment install is already running (PID $LOCK_PID). Exiting."
         exit 0
     fi
     rm -f "$LOCKFILE"
@@ -40,39 +69,103 @@ trap 'rm -f "$LOCKFILE"' EXIT
 ninja_log "Bootstrap started. Host: $(hostname)"
 ninja_log "Running as: $(id -un) ($(id))"
 
-# ── Download deploy script ─────────────────────────────────────────────────────
-DEPLOY_URL='https://raw.githubusercontent.com/anthony-rodr/claude-setup-automation/main/mac/scripts/Deploy-DevEnvironment.sh'
-ninja_log "Downloading deploy script from GitHub..."
+# ── Resolve pre-signed URLs via Lambda ────────────────────────────────────────
+ninja_log "Resolving download URLs via Lambda..."
+VERSIONS_URL=$(get_lambda_url 'mac-versions') || { ninja_log "ERROR: Failed to get mac-versions URL."; exit 1; }
+DEPLOY_URL=$(get_lambda_url 'mac-deploy')     || { ninja_log "ERROR: Failed to get mac-deploy URL."; exit 1; }
+PACKAGE_URL=$(get_lambda_url 'mac-package')   || { ninja_log "ERROR: Failed to get mac-package URL."; exit 1; }
+ninja_log "URLs resolved."
 
-if ! curl -fsSL \
-    -H 'User-Agent: claude-setup-automation' \
-    "$DEPLOY_URL" \
-    -o "$DEPLOY_SCRIPT"; then
+# ── Fetch VERSIONS.md and extract expected Deploy SHA256 ───────────────────────
+ninja_log "Fetching VERSIONS.md for integrity check..."
+VERSIONS_CONTENT=$(curl -fsSL -H 'User-Agent: aie-dev-setup' "$VERSIONS_URL" 2>/dev/null) || {
+    ninja_log "ERROR: Failed to download VERSIONS.md."
+    exit 1
+}
+EXPECTED_DEPLOY_HASH=$(echo "$VERSIONS_CONTENT" | grep -E '^DeploySHA256:' | awk '{print $2}' | tr '[:upper:]' '[:lower:]')
+if [ -z "$EXPECTED_DEPLOY_HASH" ]; then
+    ninja_log "ERROR: DeploySHA256 not found in VERSIONS.md. Re-run PSU Build-And-Upload-Mac and re-upload all S3 files."
+    exit 1
+fi
+
+# ── Download and verify Deploy script ─────────────────────────────────────────
+ninja_log "Downloading deploy script..."
+if ! curl -fsSL -H 'User-Agent: aie-dev-setup' "$DEPLOY_URL" -o "$DEPLOY_SCRIPT"; then
     ninja_log "ERROR: Failed to download deploy script."
     exit 1
 fi
-chmod +x "$DEPLOY_SCRIPT"
-ninja_log "Deploy script downloaded. Starting installer..."
 
-# ── Run deploy script with 90-minute timeout ───────────────────────────────────
+# shasum is built into macOS; sha256sum is GNU (Linux). Try both.
+if command -v shasum &>/dev/null; then
+    ACTUAL_DEPLOY_HASH=$(shasum -a 256 "$DEPLOY_SCRIPT" | awk '{print $1}' | tr '[:upper:]' '[:lower:]')
+else
+    ACTUAL_DEPLOY_HASH=$(sha256sum "$DEPLOY_SCRIPT" | awk '{print $1}' | tr '[:upper:]' '[:lower:]')
+fi
+
+if [ "$ACTUAL_DEPLOY_HASH" != "$EXPECTED_DEPLOY_HASH" ]; then
+    ninja_log "ERROR: Deploy script integrity check FAILED."
+    ninja_log "  Expected: $EXPECTED_DEPLOY_HASH"
+    ninja_log "  Actual  : $ACTUAL_DEPLOY_HASH"
+    exit 1
+fi
+ninja_log "Deploy script verified (SHA256 OK). Starting installer..."
+chmod +x "$DEPLOY_SCRIPT"
+
+# macOS's BSD userland does not ship GNU coreutils' `timeout` (Linux/Homebrew-coreutils
+# only) - confirmed via a real deploy failure on a stock Mac exiting 127 "timeout:
+# command not found" (2026-08-04). Portable replacement: background the deploy, race a
+# watcher that kills it after the timeout, and translate "we killed it" to exit 124 so
+# the existing `-eq 124` check below still works unchanged.
+run_deploy_with_timeout() {
+    local timeout_secs="$1"; shift
+    local sentinel
+    sentinel=$(mktemp)
+    rm -f "$sentinel"
+
+    "$@" &
+    local child_pid=$!
+
+    (
+        sleep "$timeout_secs"
+        if kill -0 "$child_pid" 2>/dev/null; then
+            touch "$sentinel"
+            kill -TERM "$child_pid" 2>/dev/null
+        fi
+    ) &
+    local watcher_pid=$!
+
+    wait "$child_pid" 2>/dev/null
+    local exit_code=$?
+
+    kill "$watcher_pid" 2>/dev/null
+    wait "$watcher_pid" 2>/dev/null
+
+    if [ -f "$sentinel" ]; then
+        rm -f "$sentinel"
+        return 124
+    fi
+    return $exit_code
+}
+
+# ── Run deploy script (90-minute timeout) ─────────────────────────────────────
+# Pass pre-signed URLs via environment — Deploy uses them for staleness check and download.
 START_TIME=$(date +%s)
 FINAL_EXIT=1
 
-if timeout 5400 bash "$DEPLOY_SCRIPT" \
+if PACKAGE_URL="$PACKAGE_URL" VERSIONS_URL="$VERSIONS_URL" \
+   run_deploy_with_timeout 5400 bash "$DEPLOY_SCRIPT" \
     >"$DEPLOY_OUT" 2>"$DEPLOY_ERR"; then
     FINAL_EXIT=0
 else
     FINAL_EXIT=$?
-    if [ $FINAL_EXIT -eq 124 ]; then
-        ninja_log "Deploy timed out after 90 minutes."
-    fi
+    [ $FINAL_EXIT -eq 124 ] && ninja_log "Deploy timed out after 90 minutes."
 fi
 
 END_TIME=$(date +%s)
 DURATION=$((END_TIME - START_TIME))
 ninja_log "Install finished in $((DURATION/60))m $((DURATION%60))s. Exit code: $FINAL_EXIT"
 
-# ── Summary output (mirrors Windows bootstrap) ─────────────────────────────────
+# ── Summary output ─────────────────────────────────────────────────────────────
 VERIFY_INSTALL="$ROOT/verify-install.log"
 VERIFY_CONFIGURE="$ROOT/verify-configure.log"
 INSTALL_LOG="$ROOT/DevSetup/install.log"
