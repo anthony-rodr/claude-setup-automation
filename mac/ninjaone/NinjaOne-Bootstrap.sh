@@ -47,6 +47,15 @@ get_lambda_url() {
     }
     local url
     url=$(echo "$response" | python3 -c "import sys,json; print(json.load(sys.stdin)['url'])" 2>/dev/null || true)
+    # Fallback parse if python3 is unavailable (no jq dependency) - same pattern used
+    # elsewhere in this pipeline (Install-DevEnvironment.sh's Claude Code checksum parse).
+    # Confirmed needed in practice: a stock Mac with no Xcode Command Line Tools has no
+    # usable python3 in a non-interactive root session (2026-08-04 real deploy failure -
+    # Lambda returned a perfectly valid {"url": "..."} response, but the python3 parse
+    # silently produced nothing).
+    if [ -z "$url" ]; then
+        url=$(echo "$response" | sed -n 's/.*"url"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+    fi
     if [ -z "$url" ]; then
         echo "[ERROR] Lambda returned no URL for file=$file (response: $response)" >&2
         return 1
