@@ -1,20 +1,29 @@
 #!/bin/bash
-# Tier 2 — Deploy script (downloaded fresh from GitHub on every run)
-# Runs as root. Checks VERSIONS.md staleness, downloads the release zip,
-# extracts it, verifies integrity, then hands off to Install-DevEnvironment.sh.
+# Tier 2 — Deploy script (downloaded fresh from S3 via the Lambda-presigned URL on
+# every run). Runs as root. Checks VERSIONS.md staleness, downloads the release zip,
+# verifies its integrity, extracts it, then hands off to Install-DevEnvironment.sh.
 #
-# Stored in GitHub repo at mac/scripts/Deploy-DevEnvironment.sh.
-# NinjaOne bootstrap always pulls the latest version — no NinjaOne update needed
-# unless the bootstrap URL itself changes.
+# PACKAGE_URL / VERSIONS_URL are passed in as environment variables by
+# ninjaone/NinjaOne-Bootstrap.sh (pre-signed S3 URLs resolved via Lambda) - this
+# script must never hardcode a download source itself.
+#
+# NinjaOne bootstrap always pulls the latest version of THIS file from S3 - no
+# NinjaOne update needed unless the bootstrap script itself changes.
 
 set -uo pipefail
 
 SCRIPT_VERSION='7d249f7'  # Stamped by Package-Release.sh
 
-PACKAGE_URL='https://github.com/anthony-rodr/claude-setup-automation/releases/latest/download/mac-setup-automation.zip'
-VERSIONS_URL='https://github.com/anthony-rodr/claude-setup-automation/releases/latest/download/mac-VERSIONS.md'
+if [ -z "${PACKAGE_URL:-}" ]; then
+    echo "[ERROR] PACKAGE_URL environment variable is required (set by NinjaOne-Bootstrap.sh)." >&2
+    exit 1
+fi
+if [ -z "${VERSIONS_URL:-}" ]; then
+    echo "[ERROR] VERSIONS_URL environment variable is required (set by NinjaOne-Bootstrap.sh)." >&2
+    exit 1
+fi
 
-STAGE_DIR='/Library/MasterElectronics/Deploy'
+STAGE_DIR='/Library/AIE/Deploy'
 ZIP_PATH="$STAGE_DIR/setup.zip"
 EXTRACT_DIR="$STAGE_DIR/package"
 VERSIONS_ON_DISK="$STAGE_DIR/VERSIONS.md"
@@ -23,7 +32,7 @@ step() { echo "[$(date '+%H:%M:%S')] $*"; }
 
 # ── Banner ─────────────────────────────────────────────────────────────────────
 echo "$(printf '=%.0s' {1..64})"
-echo "  Master Electronics — Developer Environment DEPLOY (macOS)"
+echo "  AIE — Developer Environment DEPLOY (macOS)"
 echo "$(printf '=%.0s' {1..64})"
 echo "  Script version: $SCRIPT_VERSION"
 echo "$(printf '=%.0s' {1..64})"
@@ -51,12 +60,16 @@ sudo -u "$CONSOLE_USER" osascript -e \
     'display notification "IT Update: Developer tools are being deployed to this machine. Please save your work — a restart may be required when complete." with title "Master Electronics IT"' \
     2>/dev/null || step "  Could not send notification (no active session)."
 
-# ── VERSIONS.md staleness check ───────────────────────────────────────────────
+# ── VERSIONS.md staleness check + ZipSHA256 extraction ────────────────────────
+# Always fetched (even on first run) so the expected zip hash is available before
+# downloading - mirrors scripts/Deploy-DevEnvironment.ps1's Windows equivalent.
 SKIP_DOWNLOAD=false
-if [ -d "$EXTRACT_DIR" ]; then
-    step "Checking bundle version..."
-    REMOTE_VERSIONS=$(curl -fsSL -H 'User-Agent: claude-setup-automation' "$VERSIONS_URL" 2>/dev/null || echo "")
-    if [ -n "$REMOTE_VERSIONS" ] && [ -f "$VERSIONS_ON_DISK" ]; then
+EXPECTED_ZIP_HASH=""
+REMOTE_VERSIONS=$(curl -fsSL -H 'User-Agent: aie-dev-setup' "$VERSIONS_URL" 2>/dev/null || echo "")
+if [ -n "$REMOTE_VERSIONS" ]; then
+    EXPECTED_ZIP_HASH=$(echo "$REMOTE_VERSIONS" | grep -E '^ZipSHA256:' | awk '{print $2}' | tr '[:upper:]' '[:lower:]')
+    if [ -d "$EXTRACT_DIR" ] && [ -f "$VERSIONS_ON_DISK" ]; then
+        step "Checking bundle version..."
         LOCAL_VERSIONS=$(cat "$VERSIONS_ON_DISK")
         INSTALL_PRESENT=$(find "$EXTRACT_DIR" -name 'Install-DevEnvironment.sh' 2>/dev/null | head -1)
         if [ -n "$INSTALL_PRESENT" ] && [ "$REMOTE_VERSIONS" = "$LOCAL_VERSIONS" ]; then
@@ -68,20 +81,39 @@ if [ -d "$EXTRACT_DIR" ]; then
     fi
 fi
 
-# ── Download and extract ───────────────────────────────────────────────────────
+# ── Download, verify, and extract ──────────────────────────────────────────────
 if [ "$SKIP_DOWNLOAD" = false ]; then
     [ -d "$EXTRACT_DIR" ] && rm -rf "$EXTRACT_DIR"
     mkdir -p "$EXTRACT_DIR"
 
-    step "Downloading package from: $PACKAGE_URL"
+    step "Downloading package..."
     if ! curl -fsSL \
-        -H 'User-Agent: claude-setup-automation' \
+        -H 'User-Agent: aie-dev-setup' \
         "$PACKAGE_URL" \
         -o "$ZIP_PATH"; then
         echo "[ERROR] Failed to download package."
         exit 1
     fi
-    step "Download complete. Extracting..."
+    step "Download complete."
+
+    if [ -n "$EXPECTED_ZIP_HASH" ]; then
+        step "Verifying zip integrity..."
+        if command -v shasum &>/dev/null; then
+            ACTUAL_ZIP_HASH=$(shasum -a 256 "$ZIP_PATH" | awk '{print $1}' | tr '[:upper:]' '[:lower:]')
+        else
+            ACTUAL_ZIP_HASH=$(sha256sum "$ZIP_PATH" | awk '{print $1}' | tr '[:upper:]' '[:lower:]')
+        fi
+        if [ "$ACTUAL_ZIP_HASH" != "$EXPECTED_ZIP_HASH" ]; then
+            rm -f "$ZIP_PATH"
+            echo "[ERROR] ZIP integrity check FAILED — expected $EXPECTED_ZIP_HASH, got $ACTUAL_ZIP_HASH — aborting to prevent tampered package execution." >&2
+            exit 1
+        fi
+        step "ZIP integrity verified."
+    else
+        step "WARNING: No ZipSHA256 found in VERSIONS.md — skipping integrity check."
+    fi
+
+    step "Extracting..."
     unzip -q "$ZIP_PATH" -d "$EXTRACT_DIR"
     step "Extraction complete."
 
