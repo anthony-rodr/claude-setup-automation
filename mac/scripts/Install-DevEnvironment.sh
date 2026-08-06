@@ -62,6 +62,20 @@ mkdir -p "$NPM_GLOBAL/bin"
 # every check and every tool invocation in this script sees the real locations.
 export PATH="/usr/local/bin:$BREW_PREFIX/bin:$NPM_GLOBAL/bin:$PATH"
 
+# Same root-context environment gap as PATH above: $HOME is unset in this
+# execution chain too. Fatal here specifically because this script runs under
+# set -uo pipefail and nvm.sh references $HOME unconditionally - sourcing it
+# (not running it as a subprocess) means an unbound-variable error there kills
+# THIS ENTIRE SCRIPT, not just the nvm/Node step. Confirmed via a real run
+# (2026-08-06): "/Library/MasterElectronics/nvm/nvm.sh: line 2818: HOME:
+# unbound variable" - the script simply stopped dead right after nvm's
+# already-installed check, with nothing logged afterward (no Node.js install
+# attempt, no Claude Code/Desktop, no completion banner). The script runs as
+# root throughout (never sudo -u'd to $CONSOLE_USER for this part), so root's
+# own home is the correct value here - NVM_DIR is already an explicit
+# system-wide path regardless, unaffected by this.
+export HOME="${HOME:-/var/root}"
+
 # ── Logging ────────────────────────────────────────────────────────────────────
 log() {
     local level="$1"; shift
