@@ -326,8 +326,8 @@ install_powershell() {
     log_info "Downloading PowerShell 7..."
     local ps7_version
     ps7_version=$(curl -fsSL 'https://api.github.com/repos/PowerShell/PowerShell/releases/latest' \
-        -H 'User-Agent: claude-setup-automation' 2>/dev/null | \
-        grep '"tag_name"' | sed 's/.*"v\([^"]*\)".*/\1/')
+        -H 'User-Agent: aie-dev-setup' 2>/dev/null | \
+        grep -o '"tag_name":"[^"]*"' | sed 's/.*"\([^"]*\)".*/\1/' | sed 's/^v//')
     local arch
     arch=$([ "$(uname -m)" = "arm64" ] && echo "osx-arm64" || echo "osx-x64")
     local pkg_url="https://github.com/PowerShell/PowerShell/releases/latest/download/powershell-${ps7_version:-7.4.6}-${arch}.pkg"
@@ -467,8 +467,8 @@ install_github_cli() {
     arch=$([ "$(uname -m)" = "arm64" ] && echo "macOS_arm64" || echo "macOS_amd64")
     local gh_version
     gh_version=$(curl -fsSL 'https://api.github.com/repos/cli/cli/releases/latest' \
-        -H 'User-Agent: claude-setup-automation' 2>/dev/null | \
-        grep '"tag_name"' | sed 's/.*"v\([^"]*\)".*/\1/')
+        -H 'User-Agent: aie-dev-setup' 2>/dev/null | \
+        grep -o '"tag_name":"[^"]*"' | sed 's/.*"\([^"]*\)".*/\1/' | sed 's/^v//')
     local tar_url="https://github.com/cli/cli/releases/latest/download/gh_${gh_version}_${arch}.tar.gz"
     local tar_path="$TEMP_DIR/gh.tar.gz"
     if curl -fsSL "$tar_url" -o "$tar_path"; then
