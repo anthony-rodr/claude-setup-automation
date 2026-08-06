@@ -38,11 +38,14 @@ ninja_log() {
 get_lambda_url() {
     local file="$1"
     local response
-    response=$(curl -fsSL \
+    response=$(curl -fsSL --connect-timeout 15 --max-time 30 \
         -H "x-api-key: ${API_KEY}" \
         -H 'User-Agent: aie-dev-setup' \
         "${LAMBDA_URL}?file=${file}" 2>&1) || {
-        echo "[ERROR] Lambda call failed for file=$file" >&2
+        # curl's own error (timeout, TLS failure, HTTP 4xx/5xx) is already in
+        # $response via 2>&1 - previously discarded here, leaving only a
+        # generic message with no way to tell timeout vs auth vs TLS apart.
+        echo "[ERROR] Lambda call failed for file=$file: $response" >&2
         return 1
     }
     local url
