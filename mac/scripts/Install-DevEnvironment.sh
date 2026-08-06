@@ -188,22 +188,32 @@ install_homebrew() {
     fi
     log_info "Installing Homebrew as $CONSOLE_USER..."
 
-    # Pre-create and chown the target prefix as root BEFORE invoking Homebrew's own
-    # installer as a non-root user. Homebrew's install.sh only needs to verify sudo
-    # access - which fails non-interactively no matter what, since NONINTERACTIVE=1
-    # disables password prompting entirely, regardless of whether the user is a real
-    # admin (confirmed via a real deploy failure, 2026-08-05: "Need sudo access on
-    # macOS (e.g. the user anthony.rodriguez needs to be an Administrator)!" even
-    # though that user genuinely is an admin) - when IT has to create or fix ownership
-    # of the prefix itself. If the directory already exists and is already owned by
-    # $CONSOLE_USER, that check is skipped entirely, avoiding the failure. This is
-    # Homebrew's own documented workaround for unattended/MDM-triggered installs.
     mkdir -p "$BREW_PREFIX"
     chown -R "$CONSOLE_USER":staff "$BREW_PREFIX"
+
+    # Homebrew's installer performs an UNCONDITIONAL `sudo -l mkdir` capability
+    # check on macOS (have_sudo_access() in Homebrew/install.sh) - it is NOT based
+    # on directory ownership at all. A previous fix here (pre-creating/chowning
+    # $BREW_PREFIX) assumed otherwise and had no effect - confirmed via a real
+    # re-run still hitting the identical failure after that fix was deployed
+    # (2026-08-06). The real problem: `sudo -u "$CONSOLE_USER" ...` from this
+    # headless, root-driven script has no interactive session or cached sudo
+    # ticket for that user, so sudo -l can't silently confirm access and fails
+    # regardless of actual admin status - producing "Need sudo access on macOS
+    # (e.g. the user X needs to be an Administrator)!" even for a real admin.
+    #
+    # Standard unattended-Homebrew-install workaround (same pattern MDM/RMM tools
+    # like Jamf/Munki use): grant the console user temporary passwordless sudo via
+    # a sudoers.d drop-in for the duration of the install only, then remove it
+    # immediately after - whether the install succeeded or failed.
+    local sudoers_file="/etc/sudoers.d/aie-brew-temp"
+    echo "$CONSOLE_USER ALL=(ALL) NOPASSWD: ALL" > "$sudoers_file"
+    chmod 440 "$sudoers_file"
 
     local install_script="$TEMP_DIR/brew-install.sh"
     if ! curl -fsSL 'https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh' -o "$install_script"; then
         log_warn "Could not download Homebrew install script."
+        rm -f "$sudoers_file"
         return 1
     fi
     chmod +x "$install_script"
@@ -212,6 +222,9 @@ install_homebrew() {
     sudo -u "$CONSOLE_USER" env NONINTERACTIVE=1 bash "$install_script" 2>&1 | \
         tail -5 | while read -r line; do log_info "  brew-install: $line"; done
     local rc=${PIPESTATUS[0]}
+
+    rm -f "$sudoers_file"
+
     if [ $rc -eq 0 ] && [ -x "$BREW" ]; then
         log_ok "Homebrew installed."
     else
