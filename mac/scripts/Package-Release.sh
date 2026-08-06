@@ -127,13 +127,15 @@ download_if_missing \
     "https://www.python.org/ftp/python/3.12.10/python-3.12.10-macos11.pkg" \
     "Python 3.12"
 
-# GitHub CLI — arm64 and amd64 (both included; installer picks correct one)
-GH_ARM_URL=$(get_gh_release_url "cli/cli" "macOS_arm64.tar.gz" || true)
-GH_AMD_URL=$(get_gh_release_url "cli/cli" "macOS_amd64.tar.gz" || true)
-[ -n "$GH_ARM_URL" ] && download_if_missing "ME_GitHub_CLI_arm64.tar.gz" "$GH_ARM_URL" "GitHub CLI (arm64)" \
-    || warn "GitHub CLI arm64 URL unavailable — skipping (use cached file if present)."
-[ -n "$GH_AMD_URL" ] && download_if_missing "ME_GitHub_CLI_amd64.tar.gz" "$GH_AMD_URL" "GitHub CLI (amd64)" \
-    || warn "GitHub CLI amd64 URL unavailable — skipping (use cached file if present)."
+# GitHub CLI — universal .pkg (one file, both architectures). Previously bundled
+# arch-specific .tar.gz files that don't exist for macOS releases (GitHub CLI's
+# actual macOS assets are .zip, plus this universal .pkg - .tar.gz is Linux-only -
+# confirmed against the real release asset list, 2026-08-06). Every prior bundle
+# attempt silently produced an empty/unavailable URL for the same reason
+# Install-DevEnvironment.sh's direct-download tier 404'd on every run.
+GH_PKG_URL=$(get_gh_release_url "cli/cli" "macOS_universal.pkg" || true)
+[ -n "$GH_PKG_URL" ] && download_if_missing "ME_GitHub_CLI_mac.pkg" "$GH_PKG_URL" "GitHub CLI" \
+    || warn "GitHub CLI URL unavailable — skipping (use cached file if present)."
 
 # Terraform — arm64 and amd64
 TF_VERSION=$(curl -fsSL 'https://checkpoint-api.hashicorp.com/v1/check/terraform' \

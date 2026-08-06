@@ -467,50 +467,41 @@ install_github_cli() {
     log_info "=== GitHub CLI ==="
     if verify_cmd gh; then log_ok "GitHub CLI already installed — skipping."; return 0; fi
 
-    # Tier 1: Bundled tar.gz (arch-specific — Package-Release ships both variants)
-    local bundle_arch
-    bundle_arch=$([ "$(uname -m)" = "arm64" ] && echo "arm64" || echo "amd64")
-    local bundle="$BUNDLED_DIR/ME_GitHub_CLI_${bundle_arch}.tar.gz"
+    # Tier 1: Bundled universal .pkg (one file covers both architectures)
+    local bundle="$BUNDLED_DIR/ME_GitHub_CLI_mac.pkg"
     if [ -f "$bundle" ]; then
-        log_info "Installing GitHub CLI from bundled archive..."
-        local extract_dir="$TEMP_DIR/gh_extract"
-        mkdir -p "$extract_dir"
-        tar -xzf "$bundle" -C "$extract_dir" --strip-components=1
-        if [ -f "$extract_dir/bin/gh" ]; then
-            cp "$extract_dir/bin/gh" /usr/local/bin/gh
-            chmod +x /usr/local/bin/gh
-            rm -rf "$extract_dir"
+        log_info "Installing GitHub CLI from bundled PKG..."
+        if install_pkg "$bundle"; then
             log_ok "GitHub CLI installed from bundle."
             manifest_record "GitHub CLI" "installed" "bundled"
             return 0
         fi
-        rm -rf "$extract_dir"
-        log_warn "Bundled archive install failed."
+        log_warn "Bundled PKG install failed."
     fi
 
-    # Tier 2: Direct download (latest release)
+    # Tier 2: Direct download (latest release) - universal .pkg, one file for both
+    # architectures. This previously downloaded a .tar.gz URL that 404'd on EVERY
+    # run regardless of any other fix this session - GitHub CLI's actual macOS
+    # release assets are .zip (plus a universal .pkg), never .tar.gz (that's the
+    # Linux asset format only) - confirmed against the real release asset list,
+    # 2026-08-06. Switched to the universal .pkg install path (same installer -pkg
+    # pattern already used for Python/AWS CLI/PowerShell 7 in this script) instead
+    # of patching the broken archive-extraction path.
     log_info "Downloading GitHub CLI..."
-    local arch
-    arch=$([ "$(uname -m)" = "arm64" ] && echo "macOS_arm64" || echo "macOS_amd64")
     local gh_version
     gh_version=$(curl -fsSL 'https://api.github.com/repos/cli/cli/releases/latest' \
         -H 'User-Agent: aie-dev-setup' 2>/dev/null | \
         grep -o '"tag_name":"[^"]*"' | sed 's/.*"\([^"]*\)".*/\1/' | sed 's/^v//')
-    local tar_url="https://github.com/cli/cli/releases/latest/download/gh_${gh_version}_${arch}.tar.gz"
-    local tar_path="$TEMP_DIR/gh.tar.gz"
-    if curl -fsSL "$tar_url" -o "$tar_path"; then
-        local extract_dir="$TEMP_DIR/gh_extract"
-        mkdir -p "$extract_dir"
-        tar -xzf "$tar_path" -C "$extract_dir" --strip-components=1
-        if [ -f "$extract_dir/bin/gh" ]; then
-            cp "$extract_dir/bin/gh" /usr/local/bin/gh
-            chmod +x /usr/local/bin/gh
-            rm -rf "$extract_dir" "$tar_path"
+    local pkg_url="https://github.com/cli/cli/releases/latest/download/gh_${gh_version}_macOS_universal.pkg"
+    local pkg_path="$TEMP_DIR/gh.pkg"
+    if curl -fsSL "$pkg_url" -o "$pkg_path"; then
+        if install_pkg "$pkg_path"; then
+            rm -f "$pkg_path"
             log_ok "GitHub CLI installed from direct download."
             manifest_record "GitHub CLI" "installed" "direct"
             return 0
         fi
-        rm -rf "$extract_dir" "$tar_path"
+        rm -f "$pkg_path"
     fi
 
     # Tier 3: Brew
