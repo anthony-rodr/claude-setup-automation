@@ -1,9 +1,8 @@
 #!/bin/bash
-# Build script — run on dev machine to create mac-setup-automation.zip.
-# Downloads bundled installers into bundled/, validates them, creates the zip,
-# and generates mac-VERSIONS.md for the staleness check.
+# Build script — creates mac-setup-automation.zip and uploads metadata to S3.
+# Run via PSU Build-And-Upload-Mac job (Ubuntu container), or manually on a Mac/Linux machine.
 #
-# Usage: bash scripts/Package-Release.sh
+# Usage: bash mac/scripts/Package-Release.sh
 # Run from the repo root: cd /path/to/claude-setup-automation && bash mac/scripts/Package-Release.sh
 #
 # Re-runs are fast: already-present files in mac/bundled/ are skipped.
@@ -13,17 +12,28 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MAC_DIR="$(dirname "$SCRIPT_DIR")"
+REPO_ROOT="$(dirname "$MAC_DIR")"
 BUNDLED_DIR="$MAC_DIR/bundled"
 ZIP_NAME="mac-setup-automation.zip"
-VERSIONS_FILE="$MAC_DIR/mac-VERSIONS.md"
+ZIP_PATH="$REPO_ROOT/$ZIP_NAME"
+VERSIONS_FILE="$MAC_DIR/VERSIONS.md"
 
-GIT_HASH=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+GIT_HASH=$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo "unknown")
 BUILD_DATE=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
 
 info()  { echo "[INFO] $*"; }
 ok()    { echo "[ OK ] $*"; }
 warn()  { echo "[WARN] $*"; }
 error() { echo "[ERROR] $*" >&2; exit 1; }
+
+# SHA256 helper — sha256sum (Linux/Ubuntu/PSU) or shasum (macOS)
+sha256_file() {
+    if command -v sha256sum &>/dev/null; then
+        sha256sum "$1" | awk '{print $1}'
+    else
+        shasum -a 256 "$1" | awk '{print $1}'
+    fi
+}
 
 # ── Cross-platform helpers ────────────────────────────────────────────────────
 # sed -i '' is macOS BSD sed; GNU sed (Git Bash on Windows) uses sed -i with no arg.
@@ -83,10 +93,17 @@ download_if_missing() {
 get_gh_release_url() {
     local repo="$1" asset_pattern="$2"
     # grep may return exit 1 (no match) — treat as empty, not fatal.
+    # GitHub returns single-line minified JSON - a naive `grep '"browser_download_url"'`
+    # matches the ENTIRE multi-KB line (everything is one line), and a greedy sed then
+    # captures the LAST https URL anywhere in that line, not the one next to the actual
+    # match. Confirmed as the real cause of a corrupted "PowerShell 7" bundle (a small
+    # JSON asset-metadata blob instead of the real .pkg, 2026-08-06) - isolate each
+    # browser_download_url field onto its own line first with `grep -o` so the pattern
+    # match and extraction both stay scoped to one field at a time.
     curl -fsSL "https://api.github.com/repos/$repo/releases/latest" \
         -H 'User-Agent: claude-setup-automation' 2>/dev/null | \
-        grep '"browser_download_url"' | grep "$asset_pattern" | \
-        sed 's/.*"\(https[^"]*\)".*/\1/' | head -1 || true
+        grep -o '"browser_download_url":"[^"]*"' | grep "$asset_pattern" | \
+        sed 's/.*"\(https[^"]*\)"/\1/' | head -1 || true
 }
 
 # ── Bundled installers ────────────────────────────────────────────────────────
@@ -185,15 +202,23 @@ ok "All required bundle files present."
 info "Stamping scripts with git hash: $GIT_HASH"
 sed_inplace "s/GIT_COMMIT_HASH/$GIT_HASH/g" "$SCRIPT_DIR/Deploy-DevEnvironment.sh" 2>/dev/null || true
 sed_inplace "s/GIT_COMMIT_HASH/$GIT_HASH/g" "$SCRIPT_DIR/Rollback-DevEnvironment.sh" 2>/dev/null || true
-info "Restore stamped scripts after upload: git checkout -- mac/scripts/Deploy-DevEnvironment.sh mac/scripts/Rollback-DevEnvironment.sh"
+
+# Compute SHA256 of the stamped Deploy script — written to VERSIONS.md for Bootstrap
+# verification. Without this field, NinjaOne-Bootstrap.sh's integrity check finds no
+# DeploySHA256 and exits immediately after fetching VERSIONS.md - this is fatal, not
+# just a missed check (unlike ZipSHA256 below, which just skips its check if absent).
+DEPLOY_SHA256=$(sha256_file "$SCRIPT_DIR/Deploy-DevEnvironment.sh")
+ok "Deploy SHA256: $DEPLOY_SHA256"
 
 # ── Generate VERSIONS.md ───────────────────────────────────────────────────────
-info "Generating mac-VERSIONS.md..."
+info "Generating VERSIONS.md..."
 {
     echo "# Mac Bundled Installer Versions"
     echo ""
     echo "Built: $BUILD_DATE"
     echo "Commit: $GIT_HASH"
+    echo "ZipSHA256: (computed after zip is built)"
+    echo "DeploySHA256: $DEPLOY_SHA256"
     echo ""
     echo "| Package | File | Size |"
     echo "|---------|------|------|"
@@ -204,25 +229,30 @@ info "Generating mac-VERSIONS.md..."
     done
     echo ""
     echo "**Not bundled** (downloaded at runtime):"
-    echo "- Docker Desktop  (~600 MB)"
     echo "- Claude Desktop  (DMG - direct download)"
     echo ""
     echo "Re-run Package-Release.sh before each deployment wave to refresh bundled versions."
 } > "$VERSIONS_FILE"
-ok "mac-VERSIONS.md written."
+ok "VERSIONS.md written (ZipSHA256 pending)."
 
 # ── Create zip ────────────────────────────────────────────────────────────────
 info "Creating $ZIP_NAME..."
-cd "$(dirname "$MAC_DIR")"
-ZIP_SRC="mac"
-rm -f "$ZIP_NAME"
-make_zip "$ZIP_NAME" "$ZIP_SRC/scripts/" "$ZIP_SRC/bundled/"
-ok "Created $ZIP_NAME ($(du -sh "$ZIP_NAME" | awk '{print $1}'))"
+cd "$REPO_ROOT"
+rm -f "$ZIP_PATH"
+make_zip "$ZIP_NAME" "mac/scripts/" "mac/bundled/"
+ok "Created $ZIP_NAME ($(du -sh "$ZIP_PATH" | awk '{print $1}'))"
+
+# ── Compute ZipSHA256 and update VERSIONS.md ──────────────────────────────────
+ZIP_SHA256=$(sha256_file "$ZIP_PATH")
+ok "Zip SHA256: $ZIP_SHA256"
+sed_inplace "s/ZipSHA256: (computed after zip is built)/ZipSHA256: $ZIP_SHA256/" "$VERSIONS_FILE"
+ok "VERSIONS.md updated with ZipSHA256."
 
 info ""
-info "=== Next steps ==="
-info "1. Upload zip + VERSIONS.md to GitHub release:"
-info "   gh release upload v1.0 mac-setup-automation.zip mac-VERSIONS.md --clobber"
-info "2. Restore stamped scripts:"
-info "   git checkout -- mac/scripts/Deploy-DevEnvironment.sh mac/scripts/Rollback-DevEnvironment.sh"
-info "3. Run NinjaOne automation on target Mac(s)."
+info "=== Restore stamped scripts after upload ==="
+info "  git checkout -- mac/scripts/Deploy-DevEnvironment.sh mac/scripts/Rollback-DevEnvironment.sh"
+info ""
+info "=== S3 upload paths (handled by PSU Build-And-Upload-Mac job) ==="
+info "  Mac/Deploy-DevEnvironment.sh"
+info "  Mac/VERSIONS.md"
+info "  Mac/mac-setup-automation.zip"
