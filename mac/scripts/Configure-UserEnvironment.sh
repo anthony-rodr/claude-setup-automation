@@ -127,7 +127,6 @@ verify_paths() {
         "aws:aws" \
         "gh:gh" \
         "terraform:terraform" \
-        "docker:docker" \
         "node:node" \
         "npm:npm" \
         "claude:claude"; do

@@ -570,52 +570,6 @@ install_terraform() {
     return 1
 }
 
-install_docker() {
-    log_info "=== Docker Desktop ==="
-    if verify_app "/Applications/Docker.app"; then
-        log_ok "Docker Desktop already installed — skipping."; return 0
-    fi
-
-    # Tier 1: Bundled .dmg (optional — ~600 MB, may not be bundled)
-    local bundle="$BUNDLED_DIR/ME_Docker_Desktop_mac.dmg"
-    if [ -f "$bundle" ]; then
-        log_info "Installing Docker Desktop from bundled DMG..."
-        if install_dmg "$bundle" "Docker.app"; then
-            log_ok "Docker Desktop installed from bundle."
-            manifest_record "Docker Desktop" "installed" "bundled"
-            return 0
-        fi
-        log_warn "Bundled DMG install failed."
-    fi
-
-    # Tier 2: Direct download
-    log_info "Downloading Docker Desktop..."
-    local arch
-    arch=$([ "$(uname -m)" = "arm64" ] && echo "arm64" || echo "amd64")
-    local dmg_url="https://desktop.docker.com/mac/main/${arch}/Docker.dmg"
-    local dmg_path="$TEMP_DIR/Docker.dmg"
-    if invoke_with_timeout 900 curl -fsSL "$dmg_url" -o "$dmg_path"; then
-        if install_dmg "$dmg_path" "Docker.app"; then
-            rm -f "$dmg_path"
-            log_ok "Docker Desktop installed from direct download."
-            manifest_record "Docker Desktop" "installed" "direct"
-            return 0
-        fi
-        rm -f "$dmg_path"
-    fi
-
-    # Tier 3: Brew cask
-    if invoke_with_timeout 900 brew_install "docker"; then
-        log_ok "Docker Desktop installed via brew cask."
-        manifest_record "Docker Desktop" "installed" "brew"
-        return 0
-    fi
-
-    log_fail "Docker Desktop install failed."
-    manifest_record "Docker Desktop" "failed" "none"
-    return 1
-}
-
 install_nvm_and_node() {
     log_info "=== nvm + Node.js ==="
 
@@ -841,7 +795,6 @@ main() {
     run_install "AWS CLI v2"      install_awscli
     run_install "GitHub CLI"      install_github_cli
     run_install "Terraform"       install_terraform
-    run_install "Docker Desktop"  install_docker
     run_install "nvm + Node.js"   install_nvm_and_node
     run_install "Claude Code"     install_claude_code
     run_install "Claude Desktop"  install_claude_desktop
@@ -858,7 +811,6 @@ main() {
             "AWS CLI v2:aws" \
             "GitHub CLI:gh" \
             "Terraform:terraform" \
-            "Docker:docker" \
             "Node.js:node" \
             "npm:npm" \
             "Claude Code:claude"; do
@@ -879,7 +831,6 @@ main() {
             echo "  [FAIL] nvm — nvm.sh missing"
         fi
         [ -d "/Applications/Visual Studio Code.app" ] && echo "  [OK]   VS Code.app present" || echo "  [FAIL] VS Code.app missing"
-        [ -d "/Applications/Docker.app" ]             && echo "  [OK]   Docker.app present"   || echo "  [WARN] Docker.app missing"
         [ -d "/Applications/Claude.app" ]             && echo "  [OK]   Claude Desktop present" || echo "  [WARN] Claude.app missing"
     } | tee "$VERIFY_INSTALL"
 
