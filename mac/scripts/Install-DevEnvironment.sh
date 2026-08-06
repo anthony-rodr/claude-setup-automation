@@ -49,6 +49,19 @@ BREW="$BREW_PREFIX/bin/brew"
 NPM_GLOBAL="/Library/MasterElectronics/npm"
 mkdir -p "$NPM_GLOBAL/bin"
 
+# This script is invoked from a root/SYSTEM context (NinjaOne bootstrap, Intune
+# postinstall) with no login shell involved, so macOS gives it a minimal default
+# PATH (/usr/bin:/bin:/usr/sbin:/sbin) - NOT /usr/local/bin, which is where the
+# official .pkg installers for PowerShell 7, Python, AWS CLI, Terraform, and
+# GitHub CLI all place their real binaries/symlinks. verify_cmd()'s `command -v`
+# check silently failed to find every one of those tools on every re-run because
+# of this - confirmed via a real run (2026-08-06) where PS7/Python/AWS CLI/GitHub
+# CLI/Terraform all reinstalled despite already being present from a prior run,
+# while Git (/usr/bin, already on the minimal PATH) and VS Code (checked via
+# .app bundle existence, not PATH) correctly skipped. Export PATH explicitly so
+# every check and every tool invocation in this script sees the real locations.
+export PATH="/usr/local/bin:$BREW_PREFIX/bin:$NPM_GLOBAL/bin:$PATH"
+
 # ── Logging ────────────────────────────────────────────────────────────────────
 log() {
     local level="$1"; shift
@@ -166,6 +179,7 @@ brew_install() {
 verify_cmd() {
     local cmd="$1"
     command -v "$cmd" &>/dev/null || \
+    [ -x "/usr/local/bin/$cmd" ] || \
     [ -x "$BREW_PREFIX/bin/$cmd" ] || \
     [ -x "$NPM_GLOBAL/bin/$cmd" ]
 }
