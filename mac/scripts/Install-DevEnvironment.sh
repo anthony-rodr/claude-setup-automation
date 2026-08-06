@@ -187,6 +187,20 @@ install_homebrew() {
         return 0
     fi
     log_info "Installing Homebrew as $CONSOLE_USER..."
+
+    # Pre-create and chown the target prefix as root BEFORE invoking Homebrew's own
+    # installer as a non-root user. Homebrew's install.sh only needs to verify sudo
+    # access - which fails non-interactively no matter what, since NONINTERACTIVE=1
+    # disables password prompting entirely, regardless of whether the user is a real
+    # admin (confirmed via a real deploy failure, 2026-08-05: "Need sudo access on
+    # macOS (e.g. the user anthony.rodriguez needs to be an Administrator)!" even
+    # though that user genuinely is an admin) - when IT has to create or fix ownership
+    # of the prefix itself. If the directory already exists and is already owned by
+    # $CONSOLE_USER, that check is skipped entirely, avoiding the failure. This is
+    # Homebrew's own documented workaround for unattended/MDM-triggered installs.
+    mkdir -p "$BREW_PREFIX"
+    chown -R "$CONSOLE_USER":staff "$BREW_PREFIX"
+
     local install_script="$TEMP_DIR/brew-install.sh"
     if ! curl -fsSL 'https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh' -o "$install_script"; then
         log_warn "Could not download Homebrew install script."
