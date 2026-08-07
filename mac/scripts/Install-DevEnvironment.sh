@@ -178,11 +178,16 @@ brew_install() {
         log_warn "Homebrew not found at $BREW — skipping brew install for $cask_or_pkg"
         return 1
     fi
+    # HOME must be explicit here, same reasoning as install_homebrew()'s sudo -u
+    # call - this script's own HOME=/var/root export (needed for nvm.sh) can leak
+    # through sudo -u instead of resetting to $CONSOLE_USER's home, which would
+    # make brew try to write into root's cache dirs and fail with permission
+    # denied for any tool falling back to this helper.
     if [ "$is_cask" = "true" ]; then
-        sudo -u "$CONSOLE_USER" "$BREW" install --cask "$cask_or_pkg" 2>&1 | \
+        sudo -u "$CONSOLE_USER" env HOME="$CONSOLE_HOME" "$BREW" install --cask "$cask_or_pkg" 2>&1 | \
             tail -5 | while read -r line; do log_info "  brew: $line"; done
     else
-        sudo -u "$CONSOLE_USER" "$BREW" install "$cask_or_pkg" 2>&1 | \
+        sudo -u "$CONSOLE_USER" env HOME="$CONSOLE_HOME" "$BREW" install "$cask_or_pkg" 2>&1 | \
             tail -5 | while read -r line; do log_info "  brew: $line"; done
     fi
     local rc=${PIPESTATUS[0]}
@@ -247,7 +252,15 @@ install_homebrew() {
     chmod +x "$install_script"
     # sudo resets the environment (env_reset), so NONINTERACTIVE must be set via
     # `env` inside the sudo target or Homebrew's license prompt hangs headless.
-    sudo -u "$CONSOLE_USER" env NONINTERACTIVE=1 bash "$install_script" 2>&1 | \
+    # HOME must ALSO be explicit here - this script exports HOME=/var/root for
+    # itself (root context, needed so nvm.sh doesn't crash under set -u - see
+    # that export site), and on at least one real Mac that value leaked through
+    # this sudo -u call instead of being reset to $CONSOLE_USER's own home.
+    # Confirmed via a real run (2026-08-06): Homebrew, nominally running as a
+    # non-root console user, tried `mkdir -p /var/root/Library/Caches/Homebrew`
+    # and failed with permission denied - a regression from the HOME fix itself.
+    # Never rely on sudo's own env_reset/set_home behavior being correct here.
+    sudo -u "$CONSOLE_USER" env NONINTERACTIVE=1 HOME="$CONSOLE_HOME" bash "$install_script" 2>&1 | \
         tail -5 | while read -r line; do log_info "  brew-install: $line"; done
     local rc=${PIPESTATUS[0]}
 
@@ -736,7 +749,10 @@ install_claude_code() {
     log_info "  Falling back to official native install script..."
     local inst="$TEMP_DIR/claude-install.sh"
     if curl -fsSL 'https://claude.ai/install.sh' -o "$inst"; then
-        sudo -u "$CONSOLE_USER" bash "$inst" 2>&1 | \
+        # HOME must be explicit here too - the install script installs to ~/.local/bin,
+        # and this script's own HOME=/var/root export (needed for nvm.sh) can leak
+        # through sudo -u instead of resetting to $CONSOLE_USER's home.
+        sudo -u "$CONSOLE_USER" env HOME="$CONSOLE_HOME" bash "$inst" 2>&1 | \
             tail -5 | while read -r l; do log_info "  claude-install: $l"; done
         # The script installs per-user to ~/.local/bin; expose it machine-wide via symlink.
         if [ -x "$CONSOLE_HOME/.local/bin/claude" ]; then
@@ -883,7 +899,19 @@ EOF
     if [ -f "$config_script" ]; then
         log_info "Configuring user profile for $CONSOLE_USER..."
         chmod +x "$config_script"
-        sudo -u "$CONSOLE_USER" bash "$config_script" "$CONSOLE_USER" 2>&1 | \
+        # Configure-UserEnvironment.sh runs as $CONSOLE_USER (non-root) below and
+        # writes its own verify-configure.log directly into $ROOT
+        # (/Library/MasterElectronics), which this (root-owned) script created -
+        # `tee` there fails with permission denied for a non-root user. Confirmed
+        # via a real run (2026-08-06): "tee: /Library/MasterElectronics/
+        # verify-configure.log: Permission denied" - non-fatal (install still
+        # completed) but silently lost that log. Pre-create and chown the target
+        # file to the console user before handing off.
+        touch "$ROOT/verify-configure.log" 2>/dev/null
+        chown "$CONSOLE_USER" "$ROOT/verify-configure.log" 2>/dev/null
+        # HOME explicit here too, same reasoning as the other sudo -u call sites -
+        # defensive even though this script doesn't currently reference bare $HOME.
+        sudo -u "$CONSOLE_USER" env HOME="$CONSOLE_HOME" bash "$config_script" "$CONSOLE_USER" 2>&1 | \
             tee -a "$INSTALL_LOG"
     fi
 
