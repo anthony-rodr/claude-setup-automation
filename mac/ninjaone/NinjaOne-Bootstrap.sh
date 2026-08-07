@@ -179,15 +179,14 @@ ninja_log "Install finished in $((DURATION/60))m $((DURATION%60))s. Exit code: $
 
 # ── Summary output ─────────────────────────────────────────────────────────────
 # Install-DevEnvironment.sh/Configure-UserEnvironment.sh/Rollback-DevEnvironment.sh
-# all still write under the legacy /Library/MasterElectronics root, NOT $ROOT
-# (/Library/AIE) - confirmed via a real run where every one of these lookups
-# reported "not found" despite the install actually running and logging
-# (2026-08-05). Bootstrap's own ROOT is AIE-branded but the install pipeline's
-# ROOT was never migrated - point at the real location instead.
-LEGACY_ROOT="/Library/MasterElectronics"
-VERIFY_INSTALL="$LEGACY_ROOT/verify-install.log"
-VERIFY_CONFIGURE="$LEGACY_ROOT/verify-configure.log"
-INSTALL_LOG="$LEGACY_ROOT/DevSetup/install.log"
+# now all write under $ROOT (/Library/AIE) too - previously they were still on
+# the legacy /Library/MasterElectronics root while bootstrap had already moved
+# to /Library/AIE, so this summary's own lookups reported "not found" despite
+# the install actually running and logging (2026-08-05). Fully consolidated
+# 2026-08-07 - one root path across the whole pipeline.
+VERIFY_INSTALL="$ROOT/verify-install.log"
+VERIFY_CONFIGURE="$ROOT/verify-configure.log"
+INSTALL_LOG="$ROOT/DevSetup/install.log"
 
 echo ""
 echo "========== TOOL INSTALLATION =========="

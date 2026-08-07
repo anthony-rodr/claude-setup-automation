@@ -11,11 +11,11 @@ TARGET_USER="${1:-$(id -un)}"
 TARGET_HOME=$(dscl . -read "/Users/$TARGET_USER" NFSHomeDirectory 2>/dev/null | awk '{print $2}')
 TARGET_HOME="${TARGET_HOME:-/Users/$TARGET_USER}"
 
-ROOT="/Library/MasterElectronics"
+ROOT="/Library/AIE"
 VERIFY_CONFIGURE="$ROOT/verify-configure.log"
 MARKER="$TARGET_HOME/.claude/.devsetup-configured"
-NVM_DIR="/Library/MasterElectronics/nvm"
-NPM_GLOBAL="/Library/MasterElectronics/npm"
+NVM_DIR="$ROOT/nvm"
+NPM_GLOBAL="$ROOT/npm"
 
 BREW_PREFIX=$([ "$(uname -m)" = "arm64" ] && echo "/opt/homebrew" || echo "/usr/local")
 

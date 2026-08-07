@@ -1,6 +1,6 @@
 #!/bin/bash
 # Rollback script — uninstalls packages recorded in the manifest.
-# Runs as root. Reads /Library/MasterElectronics/DevSetup/manifest.json
+# Runs as root. Reads /Library/AIE/DevSetup/manifest.json
 # and removes each package that was installed by the installer.
 #
 # Usage: sudo bash Rollback-DevEnvironment.sh [--dry-run]
@@ -10,7 +10,7 @@ set -uo pipefail
 DRY_RUN=false
 [ "${1:-}" = "--dry-run" ] && DRY_RUN=true
 
-ROOT="/Library/MasterElectronics"
+ROOT="/Library/AIE"
 MANIFEST="$ROOT/DevSetup/manifest.json"
 LOG_DIR="$ROOT/Logs"
 ROLLBACK_LOG="$LOG_DIR/rollback-$(date '+%Y%m%d-%H%M%S').log"
@@ -263,7 +263,7 @@ echo "$ENTRIES" | while IFS='|' read -r name method; do
     esac
 done
 
-# ── Clean up MasterElectronics directories ────────────────────────────────────
+# ── Clean up AIE directories ──────────────────────────────────────────────────
 if ! $DRY_RUN; then
     log "Cleaning up $NPM_GLOBAL..."
     rm -rf "$NPM_GLOBAL" 2>/dev/null || true

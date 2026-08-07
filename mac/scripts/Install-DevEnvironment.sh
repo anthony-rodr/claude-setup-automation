@@ -16,7 +16,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PKG_ROOT="$(dirname "$SCRIPT_DIR")"
 BUNDLED_DIR="$PKG_ROOT/bundled"
 
-ROOT="/Library/MasterElectronics"
+ROOT="/Library/AIE"
 DEV_SETUP_DIR="$ROOT/DevSetup"
 TEMP_DIR="$ROOT/Temp"
 LOG_DIR="$ROOT/Logs"
@@ -46,7 +46,7 @@ fi
 BREW="$BREW_PREFIX/bin/brew"
 
 # npm global prefix — system-wide (matches Windows C:\ProgramData\npm pattern)
-NPM_GLOBAL="/Library/MasterElectronics/npm"
+NPM_GLOBAL="$ROOT/npm"
 mkdir -p "$NPM_GLOBAL/bin"
 
 # This script is invoked from a root/SYSTEM context (NinjaOne bootstrap, Intune
@@ -619,7 +619,7 @@ install_nvm_and_node() {
     log_info "=== nvm + Node.js ==="
 
     # nvm installs per-user — install to a system-wide location accessible to all
-    NVM_DIR="/Library/MasterElectronics/nvm"
+    NVM_DIR="$ROOT/nvm"
     mkdir -p "$NVM_DIR"
     export NVM_DIR
 
@@ -873,8 +873,8 @@ main() {
             fi
         done
         # nvm is a shell function, not a binary — verify by file, not PATH.
-        if [ -f "${NVM_DIR:-/Library/MasterElectronics/nvm}/nvm.sh" ]; then
-            echo "  [OK]   nvm — installed at ${NVM_DIR:-/Library/MasterElectronics/nvm}"
+        if [ -f "${NVM_DIR:-$ROOT/nvm}/nvm.sh" ]; then
+            echo "  [OK]   nvm — installed at ${NVM_DIR:-$ROOT/nvm}"
         else
             echo "  [FAIL] nvm — nvm.sh missing"
         fi
